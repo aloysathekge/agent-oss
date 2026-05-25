@@ -6,7 +6,7 @@ Quarq Agent is a memory-first AI agent built by QuarqLabs for long-context perso
 
 It is designed as an open, inspectable alternative to memory agents such as Hermes or OpenClaw, with a stronger emphasis on durable local memory, strict attribution, self-correcting retrieval, and benchmark-grade long-term recall.
 
-The current local benchmark run is in progress on LongMemEval-S and is tracking in the 99.6% to 99.7% range. The latest checked report in `reports/longmemeval_results.json` shows `237 / 238` correct, or `99.58%`, with the full 500-question run still continuing.
+The current local benchmark run is in progress on LongMemEval-S and is tracking in the 99.6% to 99.7% range. The latest checked report in `reports/longmemeval_results.json` shows `240` yes, `1` no, or `99.59%`, with the full 500-question run still continuing.
 
 ## Why Quarq Exists
 
@@ -394,8 +394,8 @@ The benchmark pipeline:
 Current checked local report:
 
 ```text
-LongMemEval-S checkpoint: 237 / 238 correct
-Accuracy: 99.58%
+LongMemEval-S checkpoint: 240 yes / 1 no
+Accuracy: 99.59%
 Status: 500-question run in progress
 ```
 
