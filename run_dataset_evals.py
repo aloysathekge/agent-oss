@@ -194,7 +194,8 @@ EVALUATION RULES:
 8. FORMATTING & TABLE EXCLUSION (CRITICAL): The agent must often follow strict formatting rules (e.g., Markdown tables, bold headers) that the EXPECTED answer does not use. You are FORBIDDEN from penalizing the agent for using tables, bullet points, or structured headers. If the factual conclusion inside the table matches the EXPECTED answer, you MUST output 'YES'.
 9. PARTIAL DATA & MISSING VARIABLES (CRITICAL): If the EXPECTED answer states that a calculation cannot be completed because a specific variable is missing (e.g., "did not mention Seattle"), and the AGENT successfully identifies that the exact same variable is missing or zero (e.g., "Seattle: 0", "no data for Seattle"), you MUST output 'YES'. Do not penalize the agent if it proceeds to calculate a "partial total" using the available numbers; recognizing the missing variable is the core success criterion.
 10. Only output 'NO' if the core factual information is entirely missing, if the agent violates a core constraint, or if the agent explicitly says it doesn't know without providing any correct conditional deduction.
-
+11.UNIT GRANULARITY ACCEPTANCE:
+If the question asks for a duration in a coarse unit such as weeks, months, or years, and the expected answer gives only that coarse unit, accept an agent answer that gives the same coarse-unit value plus a smaller-unit remainder, as long as the coarse-unit value matches and the answer does not contradict the expected result.
 Output ONLY 'YES' or 'NO'."""
 
     response = await judge_llm.ainvoke([HumanMessage(content=judge_prompt)])
