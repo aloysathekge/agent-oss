@@ -1132,6 +1132,13 @@ async def generate_response_node(state: AgentState):
        - If the exact requested target lacks the required variables (e.g., missing costs, dates, or measurements), you MUST trigger the REQUIRED_DATA flag. Do not map the user's request to an unrelated entity to force an answer.
 
     5. ENUMERATION & DEDUPLICATION RULE: If the user asks for a count or total (e.g., "How many...", "What are all the..."), you MUST explicitly list out the specific names, entities, or events that make up that count in your final response. Never just provide the raw number. DO NOT DOUBLE-COUNT: If an undated memory describes the same event or item as a dated memory, you MUST assume they are the SAME event and merge them into a single count. BE INCLUSIVE OF CATEGORIES, SUB-TYPES, MEDIUMS AND FORMATS: When asked to count a broad overarching category (e.g., "accessories", "furniture", "electronics", "media"), you MUST actively include all specific sub-types and variants (e.g., rings and watches; desks and beds; phones and laptops; physical and digital). Do not exclude items just because they are referred to by their specific sub-type names rather than the broad category name.
+
+    REQUESTED CARDINALITY & CATEGORY GUARD:
+    If the user asks for exactly N items of a category, the answer must contain exactly N category-matching items unless REQUIRED_DATA is triggered.
+
+    The category noun in the user question is binding. Include only candidates explicitly matching that category or explicitly described as belonging to it. Exclude nearby or related entity types even if they are topically similar.
+
+    If retrieved candidates exceed N, filter by exact category match before ordering, counting, or listing.
     
     6. CHRONOLOGICAL INFERENCE (CRITICAL): If the user asks a sequence or date-gap question:
         - You MUST identify the anchor event and its exact narrative date from the memory content.

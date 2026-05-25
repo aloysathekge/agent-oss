@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 from typing import List, Dict
+from urllib.request import urlretrieve
 
 from dotenv import load_dotenv
 from pydantic import SecretStr
@@ -18,9 +19,18 @@ from langchain_openai import ChatOpenAI
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 
-CHECKPOINT_PATH = "reports/eval_checkpoint.json"
-RESULTS_PATH = "reports/longmemeval_results.json"
-DATASET_PATH = os.path.join("eval_datasets", "longmemeval_s_cleaned.json")
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPORTS_DIR = os.path.join(ROOT_DIR, "reports")
+DATASET_DIR = os.path.join(ROOT_DIR, "eval_datasets")
+
+CHECKPOINT_PATH = os.path.join(REPORTS_DIR, "eval_checkpoint.json")
+RESULTS_PATH = os.path.join(REPORTS_DIR, "longmemeval_results.json")
+DATASET_FILENAME = "longmemeval_s_cleaned.json"
+DATASET_PATH = os.path.join(DATASET_DIR, DATASET_FILENAME)
+DATASET_URL = (
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/"
+    f"resolve/main/{DATASET_FILENAME}"
+)
 
 judge_llm = ChatOpenAI(
     model="gpt-5",
@@ -44,7 +54,7 @@ def get_checkpoint():
 
 
 def save_checkpoint(q_id, chunk_index):
-    os.makedirs("reports", exist_ok=True)
+    os.makedirs(REPORTS_DIR, exist_ok=True)
     with open(CHECKPOINT_PATH, "w") as f:
         json.dump({"question_id": q_id, "last_chunk_index": chunk_index}, f)
 
@@ -65,7 +75,49 @@ def get_completed_question_ids():
 # =========================================================
 
 
+def is_valid_dataset_file(path: str) -> bool:
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return False
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return isinstance(data, list) and len(data) > 0
+    except json.JSONDecodeError:
+        return False
+
+
+def ensure_dataset_local():
+    """Download LongMemEval-S if the local cleaned dataset file is missing."""
+    if is_valid_dataset_file(DATASET_PATH):
+        return
+
+    os.makedirs(DATASET_DIR, exist_ok=True)
+    tmp_path = f"{DATASET_PATH}.tmp"
+
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
+    print(f"📥 LongMemEval-S dataset missing. Downloading to {DATASET_PATH}...")
+
+    try:
+        urlretrieve(DATASET_URL, tmp_path)
+
+        if not is_valid_dataset_file(tmp_path):
+            raise RuntimeError("Downloaded dataset is empty or invalid JSON.")
+
+        os.replace(tmp_path, DATASET_PATH)
+        print("✅ LongMemEval-S dataset downloaded successfully.")
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise RuntimeError(
+            f"Failed to download LongMemEval-S from {DATASET_URL}"
+        ) from e
+
+
 def load_dataset_local():
+    ensure_dataset_local()
     with open(DATASET_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
