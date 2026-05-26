@@ -5,7 +5,6 @@ ISO 8601 strings (e.g. '2026-04-17T14:00:00-07:00') — the LLM constructs
 these from natural-language time references using the user's timezone from
 semantic memory.
 """
-from datetime import datetime, timedelta
 
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig # NEW IMPORT
@@ -25,12 +24,7 @@ def check_availability(date: str, start_time: str, end_time: str, config: Runnab
     Returns 'Available — no conflicts' or a list of conflicting events.
     """
 
-    # 1. EXTRACT USER ID
     user_id = config.get("configurable", {}).get("user_id")
-    channel = config.get("configurable", {}).get("channel_type")
-
-
-
     if not user_id: return "Error: Could not authenticate user identity."
 
     # 2. PASS TO SERVICE to fetch user all calender token details( access_token , refresh_token , expiry etc ) from DB 
@@ -74,7 +68,6 @@ def schedule_meeting(
         end_datetime: ISO 8601 end (e.g. '2026-04-17T15:00:00-07:00').
     """
     user_id = config.get("configurable", {}).get("user_id")
-    channel = config.get("configurable", {}).get("channel_type")
     if not user_id: return "Error: Could not authenticate user identity."
     # service = get_service(user_id)
     service = get_service()
@@ -112,7 +105,6 @@ def create_event(
         description: Optional longer description or notes for the event.
     """
     user_id = config.get("configurable", {}).get("user_id")
-    channel = config.get("configurable", {}).get("channel_type")
     if not user_id: return "Error: Could not authenticate user identity."
     # service = get_service(user_id)
     service = get_service()
@@ -144,7 +136,6 @@ def list_events(time_min: str, time_max: str, config: RunnableConfig, max_result
     Returns one line per event: 'id | summary | start | end'.
     """
     user_id = config.get("configurable", {}).get("user_id")
-    channel = config.get("configurable", {}).get("channel_type")
     if not user_id: return "Error: Could not authenticate user identity."
     # service = get_service(user_id)
     service = get_service()

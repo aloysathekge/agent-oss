@@ -7,7 +7,7 @@ import re
 import numpy as np
 import faiss
 from datetime import datetime
-from typing import TypedDict, Sequence, Optional
+from typing import TypedDict, Sequence
 from dotenv import load_dotenv
 import shutil
 import time
@@ -49,7 +49,7 @@ LOCAL_AGENT_MEMORY_DIR = os.path.join(LOCAL_MEMORY_ROOT, LOCAL_AGENT_ID)
 
 if not all([raw_api_key, AGENT_ID]):
     raise ValueError(
-        "Missing critical environment variables (OPENROUTER_API_KEY, SUPABASE keys, AGENT_ID)."
+        "Missing critical environment variables (OPENAI_API_KEY, AGENT_ID)."
     )
 
 
@@ -561,7 +561,7 @@ def sort_memories_by_recency(memory_block: str,max_lines: int = 15) -> str:
         if match:
             try:
                 return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
-            except:
+            except Exception:
                 return datetime.min
         return datetime.min
 
@@ -861,8 +861,8 @@ async def retrieve_memories_node(state: AgentState):
       # 🛠️ UPDATED: Procedural Tag Routing with CoT and Fallback
     try:
         all_rules = await load_procedural_rules()
-    except Exception as e:
-        print(f"⚠️ [Warning] Procedural rules completely failed to load after 4 retries. Moving on without them.")
+    except Exception:
+        print("⚠️ [Warning] Procedural rules completely failed to load after 4 retries. Moving on without them.")
         all_rules = []
 
 
@@ -1530,7 +1530,7 @@ FINAL VERIFICATION (STRICT ENTITY ISOLATION): Look at the expanded data provided
                 final_output = fb_data.get("agent_response", "")
             else:
                 final_output = extract_pure_text(fallback_response)
-        except:
+        except Exception:
             final_output = extract_pure_text(fallback_response)
 
     # Clean up any residual markdown or thinking blocks inside the agent_response string
@@ -1646,7 +1646,7 @@ async def learn_vector_memory(
         # Extract just the year from the string if possible, else fallback to system year
         try:
             current_year = re.search(r"\d{4}", current_date).group()
-        except:
+        except Exception:
             current_year = datetime.now().year
     else:
         current_year = datetime.now().year 
@@ -1817,7 +1817,6 @@ async def learn_vector_memory(
                 flags=re.IGNORECASE | re.MULTILINE,
             )
 
-            timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
             lines = clean_content.split("\n")
 
             for line in lines:
@@ -1975,7 +1974,7 @@ async def learn_procedural_memory(
         except json.JSONDecodeError:
             # 2. FALLBACK PARSER: If the LLM dumped raw text instead of JSON
             print(
-                f"⚠️ [Warning] Procedural Editor returned raw text, falling back to basic ADD action."
+                "⚠️ [Warning] Procedural Editor returned raw text, falling back to basic ADD action."
             )
 
             timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")

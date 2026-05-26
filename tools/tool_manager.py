@@ -12,15 +12,12 @@ sees full skill docs, only one-liners. The main LLM only sees the full doc
 of the skill actually chosen. Scales to many skills without context bloat.
 """
 import os
-from typing import Optional
+import re
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
-from pydantic import SecretStr
-import re
-# 🛠️ CHANGED: Import ChatOpenAI
 from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
+from pydantic import SecretStr
 
 from tools import discover_skills
 
@@ -29,15 +26,13 @@ load_dotenv()
 
 _raw_api_key = os.getenv("OPENAI_API_KEY")
 if not _raw_api_key:
-    raise ValueError("GEMINI_API_KEY not found in environment.")
+    raise ValueError("OPENAI_API_KEY not found in environment.")
 
 # Registry built once at import time. Adding a new skill requires a process
 # restart — fine for a prototype; hot-reload can be bolted on later.
 _SKILLS = discover_skills()
 
-# Dedicated router model. Kept on a cheap/fast model because it only ever
-# emits a single word. Uses OpenRouter via the OpenAI-compatible client —
-# same provider as the main agent LLM for consistency.
+# Dedicated router model. Kept cheap/fast because it only ever emits a single word.
 _router_llm = ChatOpenAI(
    api_key=SecretStr(_raw_api_key),
     temperature=0,
@@ -50,7 +45,7 @@ _router_llm = ChatOpenAI(
 # 🛠️ HELPER: ROBUST CONTENT EXTRACTION 
 # ==========================================
 def extract_pure_text(response) -> str:
-    """Safely extracts raw text from Gemini's complex list/dict response structures."""
+    """Safely extracts plain text from an LLM response, stripping thinking blocks and formatting."""
     content = response.content
     if isinstance(content, str):
         text = content

@@ -52,7 +52,6 @@ def _upload_to_gcs(pdf_bytes: bytes, filename: str) -> str:
 def generate_pdf(title: str, content: str, config: RunnableConfig, filename: str = "output") -> str:
     """Create a simple PDF with a title and body text. Returns a download link."""
     user_id = config.get("configurable", {}).get("user_id")
-    channel = config.get("configurable", {}).get("channel_type")
     if not user_id: return "Error: Could not authenticate user identity."
 
     pdf = FPDF()
@@ -88,7 +87,6 @@ def generate_report_pdf(title: str, sections_json: str, config: RunnableConfig, 
         filename: Output filename (without .pdf extension).
     """
     user_id = config.get("configurable", {}).get("user_id")
-    channel = config.get("configurable", {}).get("channel_type")
     if not user_id: return "Error: Could not authenticate user identity."
 
     sections = json.loads(sections_json)
@@ -141,7 +139,6 @@ def generate_table_pdf(title: str, headers_json: str, rows_json: str, config: Ru
         filename: Output filename (without .pdf extension).
     """
     user_id = config.get("configurable", {}).get("user_id")
-    channel = config.get("configurable", {}).get("channel_type")
     if not user_id: return "Error: Could not authenticate user identity."
 
     headers = json.loads(headers_json)
@@ -181,7 +178,6 @@ def generate_table_pdf(title: str, headers_json: str, rows_json: str, config: Ru
 def list_generated_pdfs(config: RunnableConfig) -> str:
     """List all previously generated PDF files in cloud storage."""
     user_id = config.get("configurable", {}).get("user_id")
-    channel = config.get("configurable", {}).get("channel_type")
     if not user_id: return "Error: Could not authenticate user identity."
 
     bucket = _get_bucket()

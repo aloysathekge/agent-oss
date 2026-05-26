@@ -65,7 +65,7 @@ def get_completed_question_ids():
             try:
                 data = json.load(f)
                 return [r["question_id"] for r in data]
-            except:
+            except Exception:
                 return []
     return []
 

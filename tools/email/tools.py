@@ -29,7 +29,6 @@ def _encode(to: str, subject: str, body: str) -> dict:
 def send_email(to: str, subject: str, body: str, config: RunnableConfig) -> str:
     """Send an email immediately. IRREVERSIBLE. Returns the sent message id."""
     user_id = config.get("configurable", {}).get("user_id")
-    channel = config.get("configurable", {}).get("channel_type")
     if not user_id: return "Error: Could not authenticate user identity."
     # service = get_service(user_id)
     service = get_service()
@@ -41,7 +40,6 @@ def send_email(to: str, subject: str, body: str, config: RunnableConfig) -> str:
 def draft_email(to: str, subject: str, body: str, config: RunnableConfig) -> str:
     """Create a Gmail draft WITHOUT sending. Use when the user wants to review before sending."""
     user_id = config.get("configurable", {}).get("user_id")
-    channel = config.get("configurable", {}).get("channel_type")
     if not user_id: return "Error: Could not authenticate user identity."
     # service = get_service(user_id)
     service = get_service()
@@ -60,7 +58,6 @@ def search_inbox(query: str, config: RunnableConfig, max_results: int = 10) -> s
     Pass a message_id to `read_email` for the full body.
     """
     user_id = config.get("configurable", {}).get("user_id")
-    channel = config.get("configurable", {}).get("channel_type")
     if not user_id: return "Error: Could not authenticate user identity."
     # service = get_service(user_id)
     service = get_service()
@@ -90,7 +87,6 @@ def search_inbox(query: str, config: RunnableConfig, max_results: int = 10) -> s
 def read_email(message_id: str, config: RunnableConfig) -> str:
     """Fetch the full plain-text body of a single email. Use message_id from `search_inbox`."""
     user_id = config.get("configurable", {}).get("user_id")
-    channel = config.get("configurable", {}).get("channel_type")
     if not user_id: return "Error: Could not authenticate user identity."
     # service = get_service(user_id)
     service = get_service()

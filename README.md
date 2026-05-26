@@ -401,13 +401,18 @@ Status: 500-question run in progress
 
 These results are local and in progress until independently reproduced from a clean checkout.
 
+## Requirements
+
+- Python 3.11 or higher
+- An [OpenAI API key](https://platform.openai.com/api-keys)
+
 ## Quick Start
 
 Create a virtual environment:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 ```
 
 Install dependencies:
@@ -500,4 +505,4 @@ The current version is optimized for long-memory evaluation and single-user loca
 
 ## License
 
-This repository is prepared for open source release. Add the final license file before public distribution.
+Apache License 2.0. See [LICENSE](LICENSE) for details.

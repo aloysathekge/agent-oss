@@ -6,10 +6,11 @@ This is the SINGLE integration gateway — all external callers (main.py,
 webhooks, future APIs) go through this module. They never import from
 agent.py or multimodal.py directly.
 """
-from typing import Sequence, Tuple
+from typing import Optional, Sequence, Tuple
+
 from langchain_core.messages import BaseMessage
+
 from agent import app, AgentState
-import os
 
 
 async def get_quarq_response(
@@ -18,7 +19,7 @@ async def get_quarq_response(
     user_id: str, 
     channel_type: str,
     skip_learning: bool = False,
-    current_date: str = None
+    current_date: Optional[str] = None
 ) -> Tuple[str, dict,dict]:
     """
     Public API to invoke the Quarq Agent.

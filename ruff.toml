@@ -1,0 +1,31 @@
+# Ruff configuration for Quarq Agent
+# https://docs.astral.sh/ruff/configuration/
+
+target-version = "py311"
+
+# Lint only the active codebase; legacy agent iterations are reference-only.
+exclude = [
+    "agent_v1.py",
+    "agent_v2.py",
+    "agent_v3.py",
+    "content_check.py",
+    "check_dataset_raw.py",
+    "monitor_results.py",
+]
+
+[lint]
+select = [
+    "F",    # Pyflakes: unused imports, undefined names, f-strings without placeholders
+    "E4",   # Import-related pycodestyle errors
+    "E7",   # Statement-related pycodestyle errors (E711, E712, E721 …)
+    "E9",   # Runtime errors: syntax, IO
+    "W",    # Pycodestyle warnings
+]
+
+ignore = [
+    "E701",  # Multiple statements on one line — existing style throughout codebase
+    "E711",  # Comparison to None — intentional in several places
+    "E712",  # Comparison to True/False — intentional
+    "W291",  # Trailing whitespace — cosmetic
+    "W293",  # Whitespace on blank line — cosmetic
+]

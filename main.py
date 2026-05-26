@@ -50,7 +50,7 @@ async def chat(req: ChatRequest):
         raise HTTPException(status_code=400, detail="prompt is required")
 
     try:
-        response = await get_quarq_response(
+        response, _, _ = await get_quarq_response(
             user_prompt=req.prompt,
             user_id=AGENT_USER_ID,
             channel_type=req.channel_type,
