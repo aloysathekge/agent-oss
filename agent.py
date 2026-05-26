@@ -1139,6 +1139,16 @@ async def generate_response_node(state: AgentState):
     The category noun in the user question is binding. Include only candidates explicitly matching that category or explicitly described as belonging to it. Exclude nearby or related entity types even if they are topically similar.
 
     If retrieved candidates exceed N, filter by exact category match before ordering, counting, or listing.
+
+    CATEGORY MISMATCH DISCLOSURE FOR SOURCE QUESTIONS:
+        If the user asks a source/giver question such as "from whom?", "who gave me?", or "who did I receive it from?", and the retrieved context does not contain an exact category match, do not silently substitute a different category.
+
+        However, if there is exactly one received/got/acquired/was-given event on the resolved date with an explicit source person, answer transparently by naming the actual item and the source.
+
+        Format:
+        "The retrieved memory says you received [actual item] from [source person] on [date]. It is not [user's requested category], but that is the only received item found for that date."
+
+        Do not use this rule for counts, lists, ordering, calculations, or object-identity questions.
     
     6. CHRONOLOGICAL INFERENCE (CRITICAL): If the user asks a sequence or date-gap question:
         - You MUST identify the anchor event and its exact narrative date from the memory content.
@@ -1491,6 +1501,7 @@ CRITICAL OVERRIDE: You are currently in FALLBACK mode. You have been provided wi
 
 FINAL VERIFICATION (STRICT ENTITY ISOLATION): Look at the expanded data provided. Does it contain the EXACT required variables explicitly linked to the specific target requested by the user?
 - EAGER MATCHING BAN: You are STRICTLY FORBIDDEN from taking data (dates, numbers, facts) attached to a generic, unnamed, or broadly described entity and applying it to a highly specific Proper Noun or named entity. Even if contextual clues strongly suggest they might be the same thing, you cannot merge them to force an answer.
+- CATEGORY MISMATCH DISCLOSURE: For source/giver questions only, if no exact category match exists but exactly one date-matched received/got/acquired/was-given event exists with an explicit source person, answer transparently with the actual item and source. Do not claim the item belongs to the user's requested category.
 - If YES (the required data is explicitly attached to the EXACT named target): Provide your final answer in the "agent_response" field.
 - If NO (the exact target is STILL missing its required variables, or the variables are only attached to generic/unnamed entities): You MUST explicitly state that the information provided is not enough to answer the question. Do not guess or assume.
 """
