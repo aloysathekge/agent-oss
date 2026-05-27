@@ -1148,6 +1148,18 @@ async def generate_response_node(state: AgentState):
 
         choose the actual or experienced event for questions asking what the user did.
 
+    ACQUISITION VERB DISAMBIGUATION:
+        For factual recall questions asking what item the user got/acquired/bought/ordered/purchased/received/obtained on a resolved date, retrieval may contain a different acquisition verb.
+
+        If the question only asks for the item identity, and the retrieved memory has exactly one date-matched acquisition event for a category-compatible item, you may answer with that item while preserving the memory's actual verb.
+
+        Do NOT rewrite the event as a purchase unless the memory says bought, purchased, paid, ordered, or gives a price/seller transaction.
+
+        If the user asks specifically about payment, cost, seller, purchase method, or whether it was bought versus gifted/received/found, strict verb/source matching is required.
+
+        If the user's verb conflicts with the memory's verb, answer transparently:
+        "The memory says you [actual verb] [item] on [date]. It does not say you bought it."
+
     3. STRICT ENTITY ISOLATION (NO HIJACKING): If the user asks a question involving a specific target (e.g., a specific project, person, item, or location), you MUST ONLY use facts, numbers, or attributes explicitly linked to THAT EXACT target in the text. 
        - You are STRICTLY FORBIDDEN from substituting or "stealing" data from a different but similar target in the context just to complete a calculation or fulfill a request. 
        - If the exact requested target lacks the required variables (e.g., missing costs, dates, or measurements), you MUST trigger the REQUIRED_DATA flag. Do not map the user's request to an unrelated entity to force an answer.
