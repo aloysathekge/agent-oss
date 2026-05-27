@@ -1099,8 +1099,16 @@ async def generate_response_node(state: AgentState):
         A date attached only to a broader category, generic description, nearby memory, related topic, or semantically similar event is not valid evidence for the named event.
         You may merge a date from another retrieved memory only if that memory explicitly names the same event/entity or an exact alias.
         If a required named event lacks an explicit narrative date after exact-alias merging, trigger REQUIRED_DATA instead of guessing.
-    3. CONTRADICTIONS: If two memories explicitly contradict each other (e.g., "User's favorite color is blue" vs "User's favorite color is red"), the NEWER memory (higher timestamp) is the ABSOLUTE TRUTH. Ignore the older memory.
-    4. COMPLEMENTARY FACTS (MERGE RULE): If multiple memories describe the SAME past event, role, entity, or item without directly contradicting (e.g., "Previous job was marketing specialist" and "Previous job involved managing interns"), you MUST synthesize and combine all of them to provide a complete, highly detailed picture. Do not discard details just because they are slightly older, unless they are explicitly corrected.
+    3. MENTION-DATE VS EVENT-DATE DISAMBIGUATION:
+        If the user asks what they mentioned, discussed, said, recalled, shared, talked about, participated in, or referred to "a week ago" / "last week" / on a relative conversation date, the resolved date may refer to the conversation/session date, not necessarily the historical date of the underlying event.
+
+        For such questions, prioritize memories whose narrative line is anchored to the resolved conversation date and contains the requested event/entity, even if the underlying event happened earlier or is described as recent/before that date.
+
+        Do not reject a correct answer merely because the underlying event has no exact historical date, if the memory explicitly says that on the resolved conversation date the user discussed, recalled, shared, or drew from that event.
+
+        Only require the underlying event date when the user explicitly asks when the event happened, how long since the event happened, or for a date gap between actual events.
+    4. CONTRADICTIONS: If two memories explicitly contradict each other (e.g., "User's favorite color is blue" vs "User's favorite color is red"), the NEWER memory (higher timestamp) is the ABSOLUTE TRUTH. Ignore the older memory.
+    5. COMPLEMENTARY FACTS (MERGE RULE): If multiple memories describe the SAME past event, role, entity, or item without directly contradicting (e.g., "Previous job was marketing specialist" and "Previous job involved managing interns"), you MUST synthesize and combine all of them to provide a complete, highly detailed picture. Do not discard details just because they are slightly older, unless they are explicitly corrected.
     {temporal_hack}
 
     CONFIDENCE & SYNTHESIS PROTOCOL:
@@ -1126,6 +1134,19 @@ async def generate_response_node(state: AgentState):
         For exact totals, use only exact unqualified values. Exclude "over X", "more than X", "at least X", "around X", "about X", and ranges unless the user asks for an estimate/minimum/range.
 
         Before excluding a qualified value, merge duplicate memories for the same real-world event/item. If any duplicate gives an exact unqualified value for that same event/item, use the exact value.
+
+    EVENT STATE DISAMBIGUATION (CRITICAL):
+        When the user asks what they did, used, took, visited, ate, wore, received, attended, bought, or experienced, prefer memories where the action actually happened or was experienced by the user.
+
+        Do NOT answer with memories whose state is only planned, booked, scheduled, considered, compared, researched, intended, potential, upcoming, or hypothetical unless the user specifically asks what they planned, booked, scheduled, considered, compared, or researched.
+
+        A record date for planning, booking, discussing, or researching is not automatically the event date for the underlying action.
+
+        If the same date contains both:
+        - an actual or experienced event,
+        - and a planned, booked, scheduled, considered, compared, researched, intended, potential, upcoming, or hypothetical event,
+
+        choose the actual or experienced event for questions asking what the user did.
 
     3. STRICT ENTITY ISOLATION (NO HIJACKING): If the user asks a question involving a specific target (e.g., a specific project, person, item, or location), you MUST ONLY use facts, numbers, or attributes explicitly linked to THAT EXACT target in the text. 
        - You are STRICTLY FORBIDDEN from substituting or "stealing" data from a different but similar target in the context just to complete a calculation or fulfill a request. 
