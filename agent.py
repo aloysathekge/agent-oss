@@ -1167,13 +1167,10 @@ async def generate_response_node(state: AgentState):
 
     ACQUISITION VERB DISAMBIGUATION:
         For factual recall questions asking what item the user got/acquired/bought/ordered/purchased/received/obtained on a resolved date, retrieval may contain a different acquisition verb.
-
         If the question only asks for the item identity, and the retrieved memory has exactly one date-matched acquisition event for a category-compatible item, you may answer with that item while preserving the memory's actual verb.
-
+        For date, duration, or ordering questions, a dated acquisition/transfer/gift event can be used as the event anchor when the question is not specifically asking about payment, seller, cost, or purchase method.
         Do NOT rewrite the event as a purchase unless the memory says bought, purchased, paid, ordered, or gives a price/seller transaction.
-
         If the user asks specifically about payment, cost, seller, purchase method, or whether it was bought versus gifted/received/found, strict verb/source matching is required.
-
         If the user's verb conflicts with the memory's verb, answer transparently:
         "The memory says you [actual verb] [item] on [date]. It does not say you bought it."
 
