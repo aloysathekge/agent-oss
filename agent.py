@@ -1099,7 +1099,23 @@ async def generate_response_node(state: AgentState):
         A date attached only to a broader category, generic description, nearby memory, related topic, or semantically similar event is not valid evidence for the named event.
         You may merge a date from another retrieved memory only if that memory explicitly names the same event/entity or an exact alias.
         If a required named event lacks an explicit narrative date after exact-alias merging, trigger REQUIRED_DATA instead of guessing.
-    3. MENTION-DATE VS EVENT-DATE DISAMBIGUATION:
+    3. RELATIVE ORDERING SUFFICIENCY:
+        For "which came first/earlier/later" questions, an exact absolute date is not always required.
+
+        If both candidates have enough temporal evidence to determine ordering using explicit relative phrases, durations, session dates, or anchored mention dates, you MUST answer the ordering instead of triggering uncertainty.
+
+        Accept evidence such as:
+        - "about a month ago"
+        - "recently"
+        - "started X days/weeks ago"
+        - "finished in X days"
+        - "started on [weekday]"
+        - "as of [session/date], had already started/finished"
+
+        Use exact dates when available, but for ordering questions, approximate temporal ranges are valid if they do not overlap in a way that changes the ordering.
+
+        Only say the comparison is impossible if the relative ranges overlap or one candidate has no temporal anchor at all.
+    4. MENTION-DATE VS EVENT-DATE DISAMBIGUATION:
         If the user asks what they mentioned, discussed, said, recalled, shared, talked about, participated in, or referred to "a week ago" / "last week" / on a relative conversation date, the resolved date may refer to the conversation/session date, not necessarily the historical date of the underlying event.
 
         For such questions, prioritize memories whose narrative line is anchored to the resolved conversation date and contains the requested event/entity, even if the underlying event happened earlier or is described as recent/before that date.
@@ -1107,8 +1123,8 @@ async def generate_response_node(state: AgentState):
         Do not reject a correct answer merely because the underlying event has no exact historical date, if the memory explicitly says that on the resolved conversation date the user discussed, recalled, shared, or drew from that event.
 
         Only require the underlying event date when the user explicitly asks when the event happened, how long since the event happened, or for a date gap between actual events.
-    4. CONTRADICTIONS: If two memories explicitly contradict each other (e.g., "User's favorite color is blue" vs "User's favorite color is red"), the NEWER memory (higher timestamp) is the ABSOLUTE TRUTH. Ignore the older memory.
-    5. COMPLEMENTARY FACTS (MERGE RULE): If multiple memories describe the SAME past event, role, entity, or item without directly contradicting (e.g., "Previous job was marketing specialist" and "Previous job involved managing interns"), you MUST synthesize and combine all of them to provide a complete, highly detailed picture. Do not discard details just because they are slightly older, unless they are explicitly corrected.
+    5. CONTRADICTIONS: If two memories explicitly contradict each other (e.g., "User's favorite color is blue" vs "User's favorite color is red"), the NEWER memory (higher timestamp) is the ABSOLUTE TRUTH. Ignore the older memory.
+    6. COMPLEMENTARY FACTS (MERGE RULE): If multiple memories describe the SAME past event, role, entity, or item without directly contradicting (e.g., "Previous job was marketing specialist" and "Previous job involved managing interns"), you MUST synthesize and combine all of them to provide a complete, highly detailed picture. Do not discard details just because they are slightly older, unless they are explicitly corrected.
     {temporal_hack}
 
     CONFIDENCE & SYNTHESIS PROTOCOL:

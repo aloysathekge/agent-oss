@@ -391,6 +391,55 @@ The benchmark pipeline:
 6. Judges with a binary evaluator
 7. Writes results to `reports/longmemeval_results.json`
 
+### Parallel Evaluation
+
+For faster local benchmark runs, Quarq also includes a process-based parallel evaluator:
+
+```bash
+EVAL_WORKERS=2 python run_dataset_evals_parallel.py
+```
+
+The parallel runner is designed for long benchmark runs where you do not want to lose completed progress. It first loads all completed question IDs from:
+
+```text
+reports/longmemeval_results.json
+reports/longmemeval_results.worker*.json
+```
+
+Then it calculates the remaining questions, splits only those questions across the requested number of workers, and launches one isolated process per worker.
+
+Each worker receives its own `AGENT_ID`:
+
+```text
+<AGENT_ID>_eval_worker_0
+<AGENT_ID>_eval_worker_1
+<AGENT_ID>_eval_worker_2
+```
+
+That means each worker gets an isolated FAISS memory folder under `local_memory/`, so multiple questions can be learned and evaluated at the same time without memory collision.
+
+Worker outputs are written independently:
+
+```text
+reports/longmemeval_results.worker0.json
+reports/longmemeval_results.worker1.json
+reports/longmemeval_results.worker2.json
+```
+
+When all workers finish, the runner merges worker outputs back into:
+
+```text
+reports/longmemeval_results.json
+```
+
+Choose `EVAL_WORKERS` based on the machine and API limits. A good starting point is the number of performance cores you are comfortable dedicating to the run, then increase until OpenAI rate limits or local CPU pressure become the bottleneck. On an 8-core machine, `2` to `4` workers is usually a practical starting range; on larger machines, scale upward gradually.
+
+To monitor live results across both the main and worker result files:
+
+```bash
+python monitor_results.py
+```
+
 Current checked local report:
 
 ```text
@@ -470,6 +519,8 @@ agent.py                  Core LangGraph agent, memory, retrieval, generation, l
 agent_connector.py        Public async integration gateway
 main.py                   FastAPI single-tenant worker
 run_dataset_evals.py      LongMemEval evaluation runner
+run_dataset_evals_parallel.py
+                          Parallel LongMemEval evaluation runner
 monitor_results.py        Benchmark monitoring helper
 tools/                    Skill registry and tool implementations
 eval_datasets/            Cleaned LongMemEval dataset

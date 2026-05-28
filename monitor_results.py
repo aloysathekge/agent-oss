@@ -5,7 +5,8 @@ import platform
 import subprocess
 from pathlib import Path
 
-FILE_PATH = "reports/longmemeval_results.json"
+REPORTS_DIR = Path("reports")
+RESULTS_PATTERN = "longmemeval_results*.json"
 CHECK_INTERVAL = 2  # seconds
 
 
@@ -31,24 +32,66 @@ PowerShell -Command "Add-Type -AssemblyName System.Speech;
         print("Speech error:", e)
 
 
-def get_file_hash(path):
-    if not Path(path).exists():
+def get_file_hash(path: Path):
+    if not path.exists():
         return None
 
     with open(path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()
 
 
-def load_json(path):
+def load_json(path: Path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def get_latest_result(data):
-    if not data:
-        return None
+def get_result_files():
+    return sorted(REPORTS_DIR.glob(RESULTS_PATTERN))
 
-    return data[-1]
+
+def get_files_hashes():
+    return {path: get_file_hash(path) for path in get_result_files()}
+
+
+def load_all_results():
+    """Load and dedupe all result files, including worker shards."""
+    merged = {}
+
+    for path in get_result_files():
+        try:
+            data = load_json(path)
+        except Exception as e:
+            print(f"Could not load {path}: {e}")
+            continue
+
+        if not isinstance(data, list):
+            continue
+
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+
+            question_id = item.get("question_id")
+            if question_id:
+                merged[question_id] = item
+
+    return list(merged.values())
+
+
+def load_changed_results(changed_files):
+    rows = []
+
+    for path in changed_files:
+        try:
+            data = load_json(path)
+        except Exception as e:
+            print(f"Could not load changed file {path}: {e}")
+            continue
+
+        if isinstance(data, list):
+            rows.extend(item for item in data if isinstance(item, dict))
+
+    return rows
 
 
 def calculate_eval_stats(data):
@@ -117,24 +160,42 @@ def announce_result(item, data):
 
 
 def main():
-    print(f"Watching file: {FILE_PATH}")
+    print(f"Watching files: {REPORTS_DIR / RESULTS_PATTERN}")
 
-    last_hash = get_file_hash(FILE_PATH)
+    last_hashes = get_files_hashes()
+    announced_ids = {
+        item.get("question_id")
+        for item in load_all_results()
+        if isinstance(item, dict) and item.get("question_id")
+    }
 
     while True:
         try:
-            current_hash = get_file_hash(FILE_PATH)
+            current_hashes = get_files_hashes()
 
-            if current_hash != last_hash:
-                print("File changed!")
+            changed_files = [
+                path
+                for path, current_hash in current_hashes.items()
+                if last_hashes.get(path) != current_hash
+            ]
 
-                data = load_json(FILE_PATH)
-                latest = get_latest_result(data)
+            if changed_files:
+                print("Files changed:", ", ".join(str(path) for path in changed_files))
 
-                if latest:
-                    announce_result(latest, data)
+                all_data = load_all_results()
+                changed_rows = load_changed_results(changed_files)
+                new_rows = [
+                    item
+                    for item in changed_rows
+                    if item.get("question_id")
+                    and item.get("question_id") not in announced_ids
+                ]
 
-                last_hash = current_hash
+                for item in new_rows:
+                    announce_result(item, all_data)
+                    announced_ids.add(item["question_id"])
+
+                last_hashes = current_hashes
 
             time.sleep(CHECK_INTERVAL)
 
