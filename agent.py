@@ -61,7 +61,7 @@ retrieval_llm = ChatOpenAI(
     model="gpt-4o-mini",
     timeout=30,      
     max_retries=3    
-        
+
 )
 
 gen_llm = ChatOpenAI(
@@ -1115,6 +1115,7 @@ async def generate_response_node(state: AgentState):
         Use exact dates when available, but for ordering questions, approximate temporal ranges are valid if they do not overlap in a way that changes the ordering.
 
         Only say the comparison is impossible if the relative ranges overlap or one candidate has no temporal anchor at all.
+
     4. MENTION-DATE VS EVENT-DATE DISAMBIGUATION:
         If the user asks what they mentioned, discussed, said, recalled, shared, talked about, participated in, or referred to "a week ago" / "last week" / on a relative conversation date, the resolved date may refer to the conversation/session date, not necessarily the historical date of the underlying event.
 
@@ -1256,6 +1257,8 @@ async def generate_response_node(state: AgentState):
     2. MULTI-STEP TOOL USE (ReAct): If you have tools available, you can call them sequentially. If the result of a tool reveals that you need more information (e.g., an email thread references a different email), you should immediately call the tool again with the new parameters.
     3. After the </thinking> block and after ALL necessary tool calls are complete, provide your final response to the user in the required JSON format.
     4. TOOL USE: If you use a tool, you MUST provide a helpful response to the user AFTER the tool execution is complete (e.g., "I found your email..." or "I've updated your calendar"). NEVER respond with only tool calls; always speak to the user.
+    5. PRESUPPOSITION CHECK:
+        If the question assumes a current/past state, but retrieved memory contains a conflicting current state, explicitly correct the false premise before answering. Do not answer only as missing data.
 
     [REQUIRED_DATA] PROTOCOL & HYDE QUERY GENERATION (CRITICAL):
     You must maintain strict skepticism about your retrieved context. You MUST trigger the REQUIRED_DATA flag in your final JSON if you encounter ANY of the following gaps:
