@@ -1801,7 +1801,10 @@ async def learn_vector_memory(
     If the user's text contains a number or measurement (e.g., "5-hour", "$40", "3 weeks", "12 items"), that exact number must appear in the extracted memory. Resolve dangling numbers to their noun using surrounding context.
     Values in subordinate or relative clauses belong to the grammatical subject of that clause, not automatically to the user or nearest person.
 
-    9. NUMERIC PRECISION CONSOLIDATION:
+    9. STATE-TRANSITION FIDELITY:
+    If the user says they started, joined, signed up for, subscribed to, tried, began using, installed, adopted, bought access to, or first used something, preserve that onset verb and resolved date. Do not compress start/use transitions into passive ownership or access facts.
+
+    10. NUMERIC PRECISION CONSOLIDATION:
     For the same real-world event/item, prefer the most precise numeric form:
     exact unqualified value > qualified value ("about", "over", "at least") > range > vague quantity.
 
@@ -1815,9 +1818,9 @@ async def learn_vector_memory(
     Correct update: "User bought a monitor for $300 on May 2, 2023; it was later described as costing about $300 and has a USB-C hub."
     Wrong update: "User bought a monitor for about $300."
 
-    10. REVOCATION: If the user explicitly revokes information, use "DELETE" on the old ID.
-    11. NO PREFIXES: Do not use "Semantic:" or "Episodic:" labels in the content.
-    12. NO GREETINGS: Ignore "Hello", "How are you", etc.
+    11. REVOCATION: If the user explicitly revokes information, use "DELETE" on the old ID.
+    12. NO PREFIXES: Do not use "Semantic:" or "Episodic:" labels in the content.
+    13. NO GREETINGS: Ignore "Hello", "How are you", etc.
 
     OUTPUT FORMAT:
     You must return a raw JSON object with an "actions" array. Return exactly `{{"actions": []}}` if no changes are needed.
