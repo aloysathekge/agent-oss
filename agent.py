@@ -1125,7 +1125,9 @@ async def generate_response_node(state: AgentState):
 
         Only require the underlying event date when the user explicitly asks when the event happened, how long since the event happened, or for a date gap between actual events.
     5. CONTRADICTIONS: If two memories explicitly contradict each other (e.g., "User's favorite color is blue" vs "User's favorite color is red"), the NEWER memory (higher timestamp) is the ABSOLUTE TRUTH. Ignore the older memory.
-    6. COMPLEMENTARY FACTS (MERGE RULE): If multiple memories describe the SAME past event, role, entity, or item without directly contradicting (e.g., "Previous job was marketing specialist" and "Previous job involved managing interns"), you MUST synthesize and combine all of them to provide a complete, highly detailed picture. Do not discard details just because they are slightly older, unless they are explicitly corrected.
+    6. MUTABLE STATE PRECEDENCE:
+        For changing user states such as routines, current jobs, subscriptions, records, goals, preferences, schedules, habits, and personal bests, prefer the latest explicit current/as-of value over older values. Do not average or merge conflicting old and new values unless the user asks for history.
+    7. COMPLEMENTARY FACTS (MERGE RULE): If multiple memories describe the SAME past event, role, entity, or item without directly contradicting (e.g., "Previous job was marketing specialist" and "Previous job involved managing interns"), you MUST synthesize and combine all of them to provide a complete, highly detailed picture. Do not discard details just because they are slightly older, unless they are explicitly corrected.
     {temporal_hack}
 
     CONFIDENCE & SYNTHESIS PROTOCOL:
