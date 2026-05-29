@@ -197,6 +197,13 @@ EVALUATION RULES:
 11. Only output 'NO' if the core factual information is entirely missing, if the agent violates a core constraint, or if the agent explicitly says it doesn't know without providing any correct conditional deduction.
 12.UNIT GRANULARITY ACCEPTANCE:
 If the question asks for a duration in a coarse unit such as weeks, months, or years, and the expected answer gives only that coarse unit, accept an agent answer that gives the same coarse-unit value plus a smaller-unit remainder, as long as the coarse-unit value matches and the answer does not contradict the expected result.
+13. NUMERIC SCALAR WORDING ACCEPTANCE:
+If the EXPECTED answer is a single numeric scalar and the question is direct factual recall, accept an AGENT answer that states the same numeric scalar with approximate wording such as "about", "around", "close to", or "nearly".
+The approximation word must modify the EXPECTED numeric value itself. Do not accept a different numeric value merely because it is close, rounded, or approximately similar.
+If the AGENT gives a different numeric scalar for the same target and does not state the EXPECTED scalar, output 'NO'.
+This rule does not apply to arithmetic, prices, payments, date gaps, exact-precision questions, or multi-number answers.
+14. ZERO / UNRECORDED COMPONENT ACCEPTANCE:
+If the EXPECTED answer is a numeric total and the AGENT states the expected numeric value for one component while correctly saying another requested component is only planned, unrecorded, unspecified, or not evidenced, accept it as YES as long as the AGENT does not add a conflicting numeric amount for that component.
 Output ONLY 'YES' or 'NO'."""
 
     response = await judge_llm.ainvoke([HumanMessage(content=judge_prompt)])
@@ -310,18 +317,18 @@ async def run_longmemeval():
             # 🛠️ WE ARE STARTING A BRAND NEW QUESTION. WIPE THE DB!
             print("🧽 New Question detected. Wiping Supabase clean...")
             # # ASK FOR CONFIRMATION
-            # while True:
-            #     user_confirm = input("⚠️ Do you want to wipe the Supabase database clean for this question? (y/n): ").strip().lower()
-            #     if user_confirm in ['y', 'yes']:
-            #         print("Wiping Supabase clean...")
-            #         await wipe_all_memories()
-            #         break
-            #     elif user_confirm in ['n', 'no']:
-            #         print("⏭️ Skipping database wipe. Proceeding with existing memory...")
-            #         break
-            #     else:
-            #         print("Invalid input. Please type 'y' or 'n'.")
-            await wipe_all_memories()
+            while True:
+                user_confirm = input("⚠️ Do you want to wipe the Supabase database clean for this question? (y/n): ").strip().lower()
+                if user_confirm in ['y', 'yes']:
+                    print("Wiping Supabase clean...")
+                    await wipe_all_memories()
+                    break
+                elif user_confirm in ['n', 'no']:
+                    print("⏭️ Skipping database wipe. Proceeding with existing memory...")
+                    break
+                else:
+                    print("Invalid input. Please type 'y' or 'n'.")
+            # await wipe_all_memories()
 
         # 3. Feed Chunks (if any are left)
         if resume_chunk_idx < len(chunks) - 1:

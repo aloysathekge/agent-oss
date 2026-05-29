@@ -229,6 +229,282 @@ def extract_json_block(text: str, is_array: bool = False) -> str:
             outermost.append((start, end, block))
 
     return outermost[-1][2] if outermost else candidates[0][2]
+
+def _dedupe_keep_order(items: list[str]) -> list[str]:
+    seen = set()
+    out = []
+    for item in items:
+        clean = re.sub(r"\s+", " ", item).strip()
+        if clean and clean not in seen:
+            seen.add(clean)
+            out.append(clean)
+    return out
+
+
+def _table_cells(line: str) -> list[str]:
+    line = line.strip().strip("|")
+    return [c.strip() for c in line.split("|")]
+
+
+def _is_table_separator(cells: list[str]) -> bool:
+    return bool(cells) and all(
+        re.fullmatch(r":?-{3,}:?", c.replace(" ", "")) for c in cells
+    )
+
+
+def extract_table_rows(text: str, current_time: str, artifact_context: str) -> list[str]:
+    lines = text.splitlines()
+    memories = []
+    i = 0
+
+    while i < len(lines) - 1:
+        if "|" not in lines[i] or "|" not in lines[i + 1]:
+            i += 1
+            continue
+
+        headers = _table_cells(lines[i])
+        sep = _table_cells(lines[i + 1])
+
+        if len(headers) < 2 or not _is_table_separator(sep):
+            i += 1
+            continue
+
+        i += 2
+        while i < len(lines) and "|" in lines[i]:
+            row = _table_cells(lines[i])
+            if len(row) >= 2 and not _is_table_separator(row):
+                row_label = row[0] or "row"
+                pairs = []
+                for h, v in zip(headers[1:], row[1:]):
+                    if h and v:
+                        pairs.append(f"{h} = {v}")
+
+                if pairs:
+                    memories.append(
+                        f"On {current_time}, in {artifact_context}, table row {row_label}: "
+                        + "; ".join(pairs)
+                        + "."
+                    )
+            i += 1
+
+    return memories
+
+
+def extract_heading_sections(text: str, current_time: str, artifact_context: str) -> list[str]:
+    lines = text.splitlines()
+    memories = []
+
+    heading_re = re.compile(
+        r"^\s*(#{1,6}\s+.+|chapter\s+\d+[:.\-].+|\d+[.)]\s+.+|[A-Z][^.!?]{3,80}:)\s*$",
+        re.IGNORECASE,
+    )
+
+    current_heading = None
+    buffer = []
+
+    def flush():
+        if current_heading and buffer:
+            content = " ".join(x.strip() for x in buffer if x.strip())
+            content = re.sub(r"\s+", " ", content).strip()
+            if content:
+                memories.append(
+                    f"On {current_time}, in {artifact_context}, section {current_heading}: {content}"
+                )
+
+    for line in lines:
+        clean = line.strip()
+        if heading_re.match(clean):
+            flush()
+            current_heading = clean.lstrip("#").strip().rstrip(":")
+            buffer = []
+        elif current_heading:
+            buffer.append(clean)
+
+    flush()
+    return memories
+
+
+def extract_list_items(text: str, current_time: str, artifact_context: str) -> list[str]:
+    memories = []
+    current_heading = "the artifact"
+
+    heading_re = re.compile(r"^\s*(#{1,6}\s+.+|[A-Z][^.!?]{3,80}:)\s*$")
+    item_re = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+(.+)$")
+
+    for line in text.splitlines():
+        clean = line.strip()
+
+        if heading_re.match(clean):
+            current_heading = clean.lstrip("#").strip().rstrip(":")
+            continue
+
+        match = item_re.match(clean)
+        if match:
+            memories.append(
+                f"On {current_time}, in {artifact_context}, under {current_heading}, list item: {match.group(1).strip()}"
+            )
+
+    return memories
+
+
+def extract_labeled_lines(text: str, current_time: str, artifact_context: str) -> list[str]:
+    memories = []
+
+    patterns = [
+        re.compile(r"^::\s*(?P<label>[^:\n]+?)\s*::\s*==\s*(?P<value>.+)$"),
+        re.compile(r"^(?P<label>[A-Za-z][^:\n]{2,80})\s*[:=]\s*(?P<value>.+)$"),
+    ]
+
+    for line in text.splitlines():
+        clean = line.strip()
+        for pattern in patterns:
+            match = pattern.match(clean)
+            if match:
+                label = match.group("label").strip()
+                value = match.group("value").strip()
+                if label.lower() in {"user", "assistant", "ai", "human", "system"}:
+                    continue
+                memories.append(
+                    f"On {current_time}, in {artifact_context}, labeled item {label}: {value}"
+                )
+                break
+
+    return memories
+
+
+def extract_structured_artifact_memories(
+    text: str,
+    current_time: str,
+    artifact_context: str,
+) -> list[str]:
+    memories = []
+    memories.extend(extract_table_rows(text, current_time, artifact_context))
+    memories.extend(extract_heading_sections(text, current_time, artifact_context))
+    memories.extend(extract_list_items(text, current_time, artifact_context))
+    memories.extend(extract_labeled_lines(text, current_time, artifact_context))
+    return _dedupe_keep_order(memories)
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    """Split a simple markdown table row into cells."""
+    line = line.strip()
+    if line.startswith("|"):
+        line = line[1:]
+    if line.endswith("|"):
+        line = line[:-1]
+    return [cell.strip() for cell in line.split("|")]
+
+
+def _is_markdown_table_line(line: str) -> bool:
+    return "|" in line and len(_split_markdown_table_row(line)) >= 2
+
+
+def _is_markdown_separator_row(cells: list[str]) -> bool:
+    if not cells:
+        return False
+
+    for cell in cells:
+        compact = cell.replace(" ", "")
+        if not re.fullmatch(r":?-{3,}:?", compact):
+            return False
+    return True
+
+
+def _clean_table_context(text: str) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^(User|AI|Assistant):\s*", "", text, flags=re.IGNORECASE)
+    return text.strip(" :-")
+
+
+def extract_markdown_table_row_memories(text: str, current_time: str = "") -> list[str]:
+    """
+    Convert markdown tables into row-level memory strings.
+
+    The learning LLM may summarize a table and drop row/cell mappings. These
+    deterministic row memories preserve the artifact shape before compression.
+    """
+    lines = text.splitlines()
+    row_memories: list[str] = []
+    i = 0
+
+    while i < len(lines):
+        if not _is_markdown_table_line(lines[i]):
+            i += 1
+            continue
+
+        if i + 1 >= len(lines):
+            break
+
+        headers = _split_markdown_table_row(lines[i])
+        separator = _split_markdown_table_row(lines[i + 1])
+
+        if not _is_markdown_separator_row(separator):
+            i += 1
+            continue
+
+        table_start = i
+        data_rows: list[list[str]] = []
+        i += 2
+
+        while i < len(lines) and _is_markdown_table_line(lines[i]):
+            row = _split_markdown_table_row(lines[i])
+            if not _is_markdown_separator_row(row):
+                data_rows.append(row)
+            i += 1
+
+        if not data_rows:
+            continue
+
+        context_lines: list[str] = []
+        context_idx = table_start - 1
+        while context_idx >= 0 and len(context_lines) < 3:
+            candidate = lines[context_idx].strip()
+            if candidate and not _is_markdown_table_line(candidate):
+                context_lines.append(candidate)
+            context_idx -= 1
+
+        context = _clean_table_context(" ".join(reversed(context_lines)))
+        if not context:
+            context = "the table"
+
+        for row_num, row in enumerate(data_rows, start=1):
+            max_len = max(len(headers), len(row))
+            padded_headers = headers + [""] * (max_len - len(headers))
+            padded_row = row + [""] * (max_len - len(row))
+
+            first_header = padded_headers[0].strip() or "row"
+            first_value = padded_row[0].strip()
+
+            cell_pairs: list[str] = []
+            for idx in range(1, max_len):
+                header = padded_headers[idx].strip() or f"Column {idx + 1}"
+                value = padded_row[idx].strip()
+                if not value:
+                    continue
+                cell_pairs.append(f"{header} = {value}")
+
+            if not cell_pairs:
+                for idx in range(max_len):
+                    header = padded_headers[idx].strip() or f"Column {idx + 1}"
+                    value = padded_row[idx].strip()
+                    if value:
+                        cell_pairs.append(f"{header} = {value}")
+
+            if not cell_pairs:
+                continue
+
+            row_label = f"{first_header} {first_value}".strip()
+            if row_label == "row":
+                row_label = f"row {row_num}"
+
+            prefix = f"On {current_time}, " if current_time else ""
+            row_memories.append(
+                f"{prefix}in {context}, table row {row_label}: "
+                + "; ".join(cell_pairs)
+                + "."
+            )
+
+    return row_memories
 # ==========================================
 # HELPER: TOKEN EXTRACTION (Breakdown)
 # ==========================================
@@ -1125,14 +1401,21 @@ async def generate_response_node(state: AgentState):
 
         Only require the underlying event date when the user explicitly asks when the event happened, how long since the event happened, or for a date gap between actual events.
     5. CONTRADICTIONS: If two memories explicitly contradict each other (e.g., "User's favorite color is blue" vs "User's favorite color is red"), the NEWER memory (higher timestamp) is the ABSOLUTE TRUTH. Ignore the older memory.
-    6. MUTABLE STATE PRECEDENCE:
-        For changing user states such as routines, current jobs, subscriptions, records, goals, preferences, schedules, habits, and personal bests, prefer the latest explicit current/as-of value over older values. Do not average or merge conflicting old and new values unless the user asks for history.
+    6. DIRECT CURRENT-STATE PRECEDENCE (OVERRIDES DERIVED MATH):
+        If retrieved context contains a direct explicit answer to a current/latest/as-of state question, use that value.
+        This includes durations, counts, frequencies, locations, jobs, subscriptions, routines, goals, preferences, possessions, schedules, and personal records.
+        Do not recompute from older start dates, event dates, or background facts when a newer direct current/as-of value exists.
+        If direct current/as-of statements conflict, the newest direct statement wins unless the user asks for history, chronology, or the original start date.
     7. COMPLEMENTARY FACTS (MERGE RULE): If multiple memories describe the SAME past event, role, entity, or item without directly contradicting (e.g., "Previous job was marketing specialist" and "Previous job involved managing interns"), you MUST synthesize and combine all of them to provide a complete, highly detailed picture. Do not discard details just because they are slightly older, unless they are explicitly corrected.
     {temporal_hack}
 
     CONFIDENCE & SYNTHESIS PROTOCOL:
     1. ZERO WORLD KNOWLEDGE (STRICT GROUNDING): You are strictly forbidden from using your internal pre-trained knowledge to fill in missing prices, dates, names, or facts. If the user asks for a price, cost, calculation, or comparison, and the exact numbers are NOT explicitly written in the [RETRIEVED CONTEXT], you MUST NOT guess or estimate based on real-world averages. You must trigger the REQUIRED_DATA flag.
-    2. DO NOT HEDGE. If the answer is in your memory, state it as absolute fact. Do not use phrases like "It seems" or "Based on my memory".
+    2. DIRECT FACTUAL ANSWER FORMAT:
+        For factual recall questions, answer only the requested fact. Do not add offers, advice, praise, or follow-up suggestions.
+        If the requested answer is a scalar, return the normalized scalar plus unit/category when useful.
+        Keep approximation or uncertainty only when the user asks for exact precision, or when the question requires arithmetic, date gaps, prices, payments, or other exact calculations.
+
     3. STRICT MATH RULE & QUANTITATIVE EXTRACTION (CRITICAL): 
        - If calculating totals from multiple events, you MUST write out the step-by-step arithmetic inside your <thinking> block. 
        - When scanning memories for numbers, you MUST treat hyphenated or descriptive numerical adjectives (e.g., "a 10-pound weight", "a 3-mile run") as exact mathematical quantities (10 pounds, 3 miles). Do not claim the exact duration, cost, or amount is unspecified if a numerical adjective is present in the text.
@@ -1142,29 +1425,21 @@ async def generate_response_node(state: AgentState):
 
     NUMERIC CALCULATION RULE:
         For any total, count, duration, price, cost, quantity, or money question, evaluate candidate numbers before using them.
-
         For each candidate number, determine:
         actor/entity, measured action/property, event/item, exactness.
-
         Actor/entity must come from the grammatical subject of the number-bearing clause. Example: in "User helped organize EVENT, which raised X", X belongs to EVENT, not User. Participation in or association with an entity does not transfer that entity's numbers to User.
-
-        Include a number only when its actor/entity and measured action/property match the user's requested calculation.
-
-        For exact totals, use only exact unqualified values. Exclude "over X", "more than X", "at least X", "around X", "about X", and ranges unless the user asks for an estimate/minimum/range.
-
-        Before excluding a qualified value, merge duplicate memories for the same real-world event/item. If any duplicate gives an exact unqualified value for that same event/item, use the exact value.
+        Include a number only when its actor/entity and measured action/property match the user's requested target.
+        For calculations, totals, differences, exact costs, and date gaps, use only exact unqualified values unless the user asks for an estimate, minimum, maximum, or range.
+        For direct scalar recall questions about a current/latest state, prefer the latest same-target scalar evidence over older exact values, while preserving any approximation or uncertainty present in that evidence.
+        Do not canonicalize approximate numbers when the user asks "exactly", asks for arithmetic, or asks for a payment/cost/date-gap calculation.
 
     EVENT STATE DISAMBIGUATION (CRITICAL):
         When the user asks what they did, used, took, visited, ate, wore, received, attended, bought, or experienced, prefer memories where the action actually happened or was experienced by the user.
-
         Do NOT answer with memories whose state is only planned, booked, scheduled, considered, compared, researched, intended, potential, upcoming, or hypothetical unless the user specifically asks what they planned, booked, scheduled, considered, compared, or researched.
-
         A record date for planning, booking, discussing, or researching is not automatically the event date for the underlying action.
-
         If the same date contains both:
         - an actual or experienced event,
         - and a planned, booked, scheduled, considered, compared, researched, intended, potential, upcoming, or hypothetical event,
-
         choose the actual or experienced event for questions asking what the user did.
 
     ACQUISITION VERB DISAMBIGUATION:
@@ -1176,28 +1451,36 @@ async def generate_response_node(state: AgentState):
         If the user's verb conflicts with the memory's verb, answer transparently:
         "The memory says you [actual verb] [item] on [date]. It does not say you bought it."
 
-    3. STRICT ENTITY ISOLATION (NO HIJACKING): If the user asks a question involving a specific target (e.g., a specific project, person, item, or location), you MUST ONLY use facts, numbers, or attributes explicitly linked to THAT EXACT target in the text. 
-       - You are STRICTLY FORBIDDEN from substituting or "stealing" data from a different but similar target in the context just to complete a calculation or fulfill a request. 
-       - If the exact requested target lacks the required variables (e.g., missing costs, dates, or measurements), you MUST trigger the REQUIRED_DATA flag. Do not map the user's request to an unrelated entity to force an answer.
+    4. TARGET BINDING & ANSWER GRANULARITY:
+        Before answering, bind every target field present in the user question: entity/name, role/title/status, organization, relationship label, artifact/event label, relation, time/scope, and answer type.
+        Treat each bound field as required evidence, not as a soft hint.
+        Candidate evidence is usable only when every bound field is supported by the same evidence chain or explicitly equated in retrieved context.
+        Do not normalize, rename, or substitute identity-bearing fields. Job titles, roles, employers, programs, subscriptions, relationship labels, event names, and artifact names are identity-bearing fields.
+        If retrieved context supports the requested relation but under a different identity-bearing field, reject that candidate and answer that the information is not enough, naming the supported field when useful.
+        Trigger REQUIRED_DATA only when the needed target field is missing and not contradicted by retrieved context.
+        Preserve the requested answer type and granularity. Do not require a narrower subtype than the question asks for, and do not answer with a broader type when a same-target narrower answer is available.
+        For travel where/stay/planning/visiting questions, treat "stay" by itself as a destination/location request, not a lodging request. A city, island, region, neighborhood, venue, or named place is sufficient unless the question explicitly asks for lodging-level details such as hotel, resort, accommodation, room, booking, address, or property name. If both broad and narrower same-trip locations are present, answer with the narrower same-trip location. If multiple same-broad-destination candidates exist, prefer the latest/direct destination statement tied to the requested trip purpose and time/scope.
+        If multiple candidates still match after target binding, choose the one with the closest relation and time/scope. If candidates remain unresolved, trigger REQUIRED_DATA.
 
-    5. ENUMERATION & DEDUPLICATION RULE: If the user asks for a count or total (e.g., "How many...", "What are all the..."), you MUST explicitly list out the specific names, entities, or events that make up that count in your final response. Never just provide the raw number. DO NOT DOUBLE-COUNT: If an undated memory describes the same event or item as a dated memory, you MUST assume they are the SAME event and merge them into a single count. BE INCLUSIVE OF CATEGORIES, SUB-TYPES, MEDIUMS AND FORMATS: When asked to count a broad overarching category (e.g., "accessories", "furniture", "electronics", "media"), you MUST actively include all specific sub-types and variants (e.g., rings and watches; desks and beds; phones and laptops; physical and digital). Do not exclude items just because they are referred to by their specific sub-type names rather than the broad category name.
+    5. ENUMERATION, CATEGORY BOUNDARY & CARDINALITY:
+        If the user asks for a count, ordered list, or "what are all", first identify the requested category noun and answer type.
+        The requested category noun is binding. Include only candidates explicitly matching that category, explicitly described as belonging to that category, or clearly a subtype of that same category.
+        Do not include sibling or nearby entity types merely because they are topically similar, appear in the same domain, or occurred in the same storyline.
+        If the user asks for exactly N items of a category, filter candidates by category before counting, ordering, or challenging the count.
+        If more than N retrieved candidates exist, exclude category-mismatched candidates first.
+        Only say the user actually has more than N items if more than N candidates remain after category filtering.
+        For ordered-list questions, order only the accepted category-matching candidates by their event dates.
+        Deduplicate repeated memories of the same event before counting.
 
-    REQUESTED CARDINALITY & CATEGORY GUARD:
-    If the user asks for exactly N items of a category, the answer must contain exactly N category-matching items unless REQUIRED_DATA is triggered.
+        CATEGORY MISMATCH DISCLOSURE FOR SOURCE QUESTIONS:
+            If the user asks a source/giver question such as "from whom?", "who gave me?", or "who did I receive it from?", and the retrieved context does not contain an exact category match, do not silently substitute a different category.
 
-    The category noun in the user question is binding. Include only candidates explicitly matching that category or explicitly described as belonging to it. Exclude nearby or related entity types even if they are topically similar.
+            However, if there is exactly one received/got/acquired/was-given event on the resolved date with an explicit source person, answer transparently by naming the actual item and the source.
 
-    If retrieved candidates exceed N, filter by exact category match before ordering, counting, or listing.
+            Format:
+            "The retrieved memory says you received [actual item] from [source person] on [date]. It is not [user's requested category], but that is the only received item found for that date."
 
-    CATEGORY MISMATCH DISCLOSURE FOR SOURCE QUESTIONS:
-        If the user asks a source/giver question such as "from whom?", "who gave me?", or "who did I receive it from?", and the retrieved context does not contain an exact category match, do not silently substitute a different category.
-
-        However, if there is exactly one received/got/acquired/was-given event on the resolved date with an explicit source person, answer transparently by naming the actual item and the source.
-
-        Format:
-        "The retrieved memory says you received [actual item] from [source person] on [date]. It is not [user's requested category], but that is the only received item found for that date."
-
-        Do not use this rule for counts, lists, ordering, calculations, or object-identity questions.
+            Do not use this rule for counts, lists, ordering, calculations, or object-identity questions.
     
     6. CHRONOLOGICAL INFERENCE (CRITICAL): If the user asks a sequence or date-gap question:
         - You MUST identify the anchor event and its exact narrative date from the memory content.
@@ -1219,23 +1502,30 @@ async def generate_response_node(state: AgentState):
     1. Inside <thinking> ... </thinking>:
        - Analyze the user's core intent.
 
-       - FACT GATHERING (MANDATORY): Scan ALL retrieved memories line-by-line. You MUST physically extract and write down EVERY specific detail, title, location, entity, and EXACT number/duration (including hyphenated adjectives like "2-day" or "3-hour") related to the user's prompt. If the user asks about a broad category, physically write down ALL specific items found in the context that logically fit within that overarching category (e.g., for "vehicles", write down cars, bikes, trucks; for "clothing", write down shirts, pants, jackets). If a quantitative number exists in the text, you are strictly forbidden from claiming it is unspecified.
+       - TARGET-FIRST FACT GATHERING:
+        First bind the requested target fields from the user question: entity/name, role/title/status, organization, relationship label, event/artifact label, relation, time/scope, and answer type.
+        Then scan retrieved memories line-by-line and extract only candidate facts that match those bound fields, or explicitly mark them as mismatched.
+        If a number exists only under a mismatched target field, treat it as unusable for the answer.
+        Never answer with a number just because it is present in retrieved context; the number must belong to the bound target.
 
        - NUMERIC EVIDENCE TABLE:
         For calculation questions, write one row per real-world event/item:
         Number | Actor/Entity | Action/Property | Event/Item | Exactness | Include/Exclude | Reason.
         Merge duplicate memories first. Actor/Entity must come from the number-bearing clause, not default to User. Include only rows whose actor, action/property, and exactness match the user's question.
 
-       - SELF-INTERROGATION & CONTEXTUAL SKEPTICISM (MANDATORY): Because AI models naturally blur semantically similar concepts together, you MUST actively interrogate your own assumptions inside this thinking block before connecting dots. 
-         * Whenever you attempt to match what the user is asking for [Target A] with what you found in the memory [Target B], you MUST explicitly write out a verification question: "Is [Target A] definitively the exact same thing as [Target B] under these specific conditions?"
-         * You must logically evaluate the context, life stages, and definitions. If the items, events, or situations have distinctly different names or scopes, you must logically deduce they are completely different. 
-         * THE "ABSENCE OF ALTERNATIVES" TRAP (CRITICAL): Just because a distinct but semantically related entity is the ONLY entity present in the retrieved context, you are STRICTLY FORBIDDEN from assuming it is the correct answer. You cannot use the "process of elimination" to force a match. If the exact specific phrase/entity requested by the user is missing, you must accept that the data is genuinely missing and trigger the REQUIRED_DATA flag. Never force a match just because it is the "closest" available option.
+       - TARGET MATCHING & CONTEXTUAL SKEPTICISM:
+         Match the user's requested entity and relation at the intended granularity.
+         Do not require a narrower subtype than the question asks for.
+         For travel where/stay/planning/visiting questions, apply the same destination-vs-lodging distinction from TARGET BINDING. Do not reject a destination answer merely because no hotel/accommodation is named.
+         Require hotel, resort, address, or exact accommodation only if the user explicitly asks for that narrower subtype.
+         Reject a candidate only when it belongs to a different entity, trip, date scope, or storyline.
 
        - FALLBACK EVALUATION (MANDATORY): 
          1. Does the user's prompt ask "How many", "Total", "Count", "List all", or "What are all"?
-            If YES: Count only the specific directly relevant items gathered from retrieved context.
-            You may answer with any count, including 0, 1, 2, 3, 4, or 5, if the retrieved context is clearly sufficient.
-            Trigger REQUIRED_DATA only if:
+            If YES: apply TARGET BINDING before counting.
+            Count only values whose identity-bearing fields, relation, and time/scope match the requested target.
+            If the only available value belongs to a different role, title, employer, relationship label, event, artifact, or storyline, answer that the information is not enough.
+            Trigger REQUIRED_DATA only if no target-matching value was found and retrieval does not already show a mismatched target:
             - no directly relevant item/date/value was found,
             - the question asks for an exhaustive list across a broad category and retrieval appears incomplete,
             - a required variable is missing for the exact named target,
@@ -1247,7 +1537,11 @@ async def generate_response_node(state: AgentState):
 
        - ADVICE & COMPARISONS: If the user asks for advice, recommendations, tips, or suggestions (e.g., "what to look for", "any ideas", "can you recommend"), you MUST check if the retrieved context mentions what they CURRENTLY own, use, or do. If they are upgrading or changing, you MUST physically write down: "Current State: [Item/Habit] -> Target State: [Item/Habit]" inside this thinking block. Your final response to the user MUST explicitly name-drop BOTH items/states and draw a direct comparison between them.
 
-       - SYNTHESIS & DEDUCTION (CRITICAL): If the user asks a specific factual question and the exact answer isn't explicitly in Episodic memory, you MUST cross-reference their Semantic habits to deduce the highly probable answer. Connect the dots. HOWEVER, you must employ strict Exact Noun Matching for formal nouns: If the user's question contains a highly specific modifier for a noun (e.g., "my LEASED apartment", "my NEW car") and the database only contains the general noun or a differently modified version (e.g., "my purchased condo", "my old car"), you are FORBIDDEN from assuming they are the same thing. You must trigger the REQUIRED_DATA flag to search for that exact specific modifier. Never assume a specific modifier applies unless it is explicitly written in the retrieved text.
+       - EVIDENCE SYNTHESIS:
+        Merge semantic and episodic facts only after the requested target has been matched.
+        The requested target includes entity/name, role/title/status, relation, time/scope, and answer type.
+        Deduction may connect compatible facts for the same target and relation, but must not create, rename, or substitute identity-bearing fields.
+        If a candidate answers the right relation but belongs to a different identity-bearing field, reject it and return insufficiency or trigger REQUIRED_DATA.
        
        - If it is a simple greeting, acknowledge it naturally without over-explaining technical facts.
        
@@ -1714,6 +2008,27 @@ async def learn_vector_memory(
         current_year = datetime.now().year 
         current_time = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
+    artifact_context = re.sub(r"\s+", " ", user_prompt).strip()
+    artifact_context = artifact_context[:220] if artifact_context else "the generated artifact"
+
+    artifact_source_text = f"{user_prompt}\n\n{ai_response}"
+
+    structured_artifact_memories = (
+        extract_structured_artifact_memories(
+            artifact_source_text,
+            current_time,
+            artifact_context,
+        )
+        if memory_type == "Episodic"
+        else []
+    )
+
+    structured_artifact_section = (
+        "\n".join(f"- {m}" for m in structured_artifact_memories)
+        if structured_artifact_memories
+        else "None"
+    )
+
     learning_prompt = f"""
     You are a Cognitive Memory Editor managing a {memory_type} database.
     Your job is to consolidate information by issuing ADD, UPDATE, or DELETE commands.
@@ -1733,6 +2048,12 @@ async def learn_vector_memory(
     User: {user_prompt}
     AI: {ai_response}
 
+    STRUCTURED ARTIFACT UNITS:
+    {structured_artifact_section}
+
+    If STRUCTURED ARTIFACT UNITS is not None, each listed unit is mandatory evidence.
+    Preserve each unit as its own ADD action unless the same unit already exists and should be updated.
+    Do not replace structured artifact units with only a broad summary.
 
     CRITICAL TIME RESOLUTION: The current system time is {current_time}. 
     If the user uses relative time words (e.g., "yesterday", "last month", "tomorrow"), you MUST convert them into absolute dates within the "content" string you generate.
@@ -1853,15 +2174,29 @@ async def learn_vector_memory(
 
     actions_executed = 0
 
-    if content and content.upper() != "NONE" and content != '{"actions": []}':
+    if (
+        (content and content.upper() != "NONE" and content != '{"actions": []}')
+        or (memory_type == "Episodic" and structured_artifact_memories)
+    ):
         try:
             # Isolate the JSON object explicitly
             json_str = extract_json_block(content, is_array=False)
-            data = json.loads(json_str)
+            data = json.loads(json_str) if json_str else {"actions": []}
             actions = data.get("actions", [])
 
             # print("actions:")
             # print(actions)
+
+            if memory_type == "Episodic":
+                existing_contents = {
+                    str(act.get("content", "")).strip()
+                    for act in actions
+                    if isinstance(act, dict)
+                }
+                for memory in structured_artifact_memories:
+                    if memory not in existing_contents:
+                        actions.append({"action": "ADD", "content": memory})
+                        existing_contents.add(memory)
 
             for act in actions:
 
