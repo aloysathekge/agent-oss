@@ -241,6 +241,10 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
     return out
 
 
+MAX_STRUCTURED_ARTIFACT_MEMORIES = 60
+MAX_ARTIFACT_LIST_ITEMS_PER_BLOCK = 10
+
+
 def _table_cells(line: str) -> list[str]:
     line = line.strip().strip("|")
     return [c.strip() for c in line.split("|")]
@@ -372,17 +376,177 @@ def extract_labeled_lines(text: str, current_time: str, artifact_context: str) -
     return memories
 
 
+def extract_explicit_artifact_block_memories(
+    text: str,
+    current_time: str,
+    artifact_context: str,
+) -> list[str]:
+    """Extract only explicit artifact blocks like `::title:: == description`."""
+    memories = []
+    marker_re = re.compile(r"::\s*(?P<label>[^:\n]{1,120}?)\s*::\s*==")
+
+    for line in text.splitlines():
+        matches = list(marker_re.finditer(line))
+        if not matches:
+            continue
+
+        for idx, match in enumerate(matches):
+            label = re.sub(r"\s+", " ", match.group("label")).strip()
+            value_start = match.end()
+            value_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(line)
+            value = re.sub(r"\s+", " ", line[value_start:value_end]).strip()
+
+            if not label or not value:
+                continue
+
+            memories.append(
+                f"On {current_time}, in {artifact_context}, explicit artifact {label}: {value}"
+            )
+
+    return _dedupe_keep_order(memories)
+
+
+def _strip_inline_markdown(text: str) -> str:
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"__(.*?)__", r"\1", text)
+    text = re.sub(r"`(.*?)`", r"\1", text)
+    return text.strip()
+
+
+def _split_named_list_item(body: str) -> tuple[str, str] | None:
+    body = _strip_inline_markdown(re.sub(r"\s+", " ", body).strip())
+    if not body:
+        return None
+
+    match = re.match(
+        r"(?P<title>.{2,120}?)(?:\s+[-–—]\s+|:\s+)(?P<desc>.+)$",
+        body,
+    )
+    if not match:
+        return None
+
+    title = _strip_inline_markdown(match.group("title")).strip(" .:-")
+    desc = _strip_inline_markdown(match.group("desc")).strip()
+
+    if not title or len(desc) < 8:
+        return None
+
+    return title, desc
+
+
+def _has_named_list_anchor(title: str) -> bool:
+    """Return true for likely named entities, not generic step labels."""
+    clean = re.sub(r"[^A-Za-z0-9&'+ ]", " ", title)
+    words = [w for w in clean.split() if w]
+    if not words:
+        return False
+
+    generic_starters = {
+        "add", "assemble", "bake", "blend", "bring", "brush", "check",
+        "choose", "consider", "create", "cut", "do", "don't", "dont",
+        "enjoy", "explore", "factor", "have", "knead", "make", "map",
+        "order", "pace", "pick", "plan", "preheat", "roll", "share",
+        "stay", "try", "use", "visit", "watch", "wear", "whisk",
+    }
+
+    capitalized = [
+        w for w in words
+        if re.match(r"^[A-Z][A-Za-z0-9&'+-]*$", w) and w.lower() not in {"a", "an", "the"}
+    ]
+    acronyms_or_numbers = [
+        w for w in words
+        if re.search(r"\d", w) or (len(w) > 1 and w.isupper())
+    ]
+
+    if len(capitalized) >= 2 or acronyms_or_numbers:
+        return True
+
+    first = words[0].lower()
+    if len(capitalized) == 1 and first not in generic_starters:
+        return True
+
+    return False
+
+
+def extract_artifact_list_item_memories(
+    text: str,
+    current_time: str,
+    artifact_context: str,
+) -> list[str]:
+    """
+    Extract high-signal bullet/numbered list items without turning every list
+    into memory. This is meant for recommendation/artifact lists like
+    `1. The Sugar Factory - ...`, not generic step-by-step instructions.
+    """
+    memories = []
+    item_re = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+(.+?)\s*$")
+    context_signal_re = re.compile(
+        r"\b(recommend|suggest|option|idea|place|spot|restaurant|shop|activity|"
+        r"things to do|where to|itinerary|list|example|dessert|dining|"
+        r"family-friendly|museum|exhibition|attraction|venue|operator|trail|"
+        r"recipe)\b",
+        re.IGNORECASE,
+    )
+
+    lines = text.splitlines()
+    current_context = artifact_context
+    block_count = 0
+
+    for line in lines:
+        clean = line.strip()
+        match = item_re.match(clean)
+
+        if not match:
+            if clean:
+                current_context = _clean_table_context(clean)[:180] or artifact_context
+            block_count = 0
+            continue
+
+        context_blob = f"{artifact_context} {current_context} {clean}"
+        if not context_signal_re.search(context_blob):
+            continue
+
+        if block_count >= MAX_ARTIFACT_LIST_ITEMS_PER_BLOCK:
+            continue
+
+        split = _split_named_list_item(match.group(1))
+        if not split:
+            continue
+
+        title, desc = split
+        if not _has_named_list_anchor(title):
+            continue
+
+        memories.append(
+            f"On {current_time}, in {artifact_context}, under {current_context}, "
+            f"list item {title}: {desc}"
+        )
+        block_count += 1
+
+    return _dedupe_keep_order(memories)
+
+
 def extract_structured_artifact_memories(
     text: str,
     current_time: str,
     artifact_context: str,
 ) -> list[str]:
     memories = []
-    memories.extend(extract_table_rows(text, current_time, artifact_context))
-    memories.extend(extract_heading_sections(text, current_time, artifact_context))
-    memories.extend(extract_list_items(text, current_time, artifact_context))
-    memories.extend(extract_labeled_lines(text, current_time, artifact_context))
-    return _dedupe_keep_order(memories)
+    memories.extend(extract_markdown_table_row_memories(text, current_time))
+    memories.extend(
+        extract_explicit_artifact_block_memories(
+            text,
+            current_time,
+            artifact_context,
+        )
+    )
+    memories.extend(extract_artifact_list_item_memories(text, current_time, artifact_context))
+
+    # Keep deterministic extraction high-signal only. Generic headings, numbered
+    # sections, and `Label: value` lines are intentionally left to the learning
+    # model because extracting all of them floods Episodic memory. List extraction
+    # is restricted to named recommendation/artifact items and capped per block.
+    return _dedupe_keep_order(memories)[:MAX_STRUCTURED_ARTIFACT_MEMORIES]
 
 
 def _split_markdown_table_row(line: str) -> list[str]:
