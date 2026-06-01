@@ -10,6 +10,8 @@ The current local implementation includes the structured artifact learning pipel
 
 Local LongMemEval-S reports are checkpoints while extractor behavior is being validated. Treat checked-in report files as local progress snapshots, not final published benchmark numbers.
 
+Benchmark cost warning: a full 500-question LongMemEval-S run with the current model mix has cost about `$2,500` in practice, or about `$5` per average question. Run a 1-question or small-sample benchmark first before starting the full dataset.
+
 ## Contents
 
 - [Why Quarq Exists](#why-quarq-exists)
@@ -26,6 +28,7 @@ Local LongMemEval-S reports are checkpoints while extractor behavior is being va
 - [Learning Pipeline](#learning-pipeline)
 - [Tool System](#tool-system)
 - [Benchmarks](#benchmarks)
+- [Benchmark Cost Planning](#benchmark-cost-planning)
 - [Current Local Metrics](#current-local-metrics)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
@@ -524,6 +527,40 @@ Current local report files:
 reports/longmemeval_results.json
 reports/longmemeval_results.worker*.json
 ```
+
+### Benchmark Cost Planning
+
+LongMemEval-S is an expensive benchmark for this agent because each question
+feeds many conversation-history chunks, and each chunk can trigger retrieval
+planning, memory learning, embeddings, and final answer generation.
+
+Observed cost with the current model mix:
+
+| Run size | Approximate cost |
+| --- | ---: |
+| 1 average question | about `$5` |
+| 10 questions | about `$50` |
+| 100 questions | about `$500` |
+| Full 500-question LongMemEval-S run | about `$2,500` |
+
+The current benchmark model mix is:
+
+| Component | Model | Input / 1M | Output / 1M | Cached input / 1M |
+| --- | --- | ---: | ---: | ---: |
+| Retrieval planning | `gpt-4o-mini` | `$0.15` | `$0.60` | `$0.075` |
+| Generation | `gpt-4.1` | `$2.00` | `$8.00` | `$0.50` |
+| Memory learning | `gpt-4.1` | `$2.00` | `$8.00` | `$0.50` |
+| Embeddings | `text-embedding-3-large` | `$0.13` | n/a | n/a |
+| Benchmark judge | `gpt-5` | `$1.25` | `$10.00` | `$0.125` |
+
+For the current LongMemEval-S dataset, the benchmark runner sees about 41,813
+chunks total, or about 83.6 chunks per question. The direct chunk-ingestion
+traffic alone is about 62.3M estimated input tokens, but that is only a lower
+bound. The full cost is higher because the agent re-reads chunk content during
+learning and creates embeddings for retrieval and memory writes.
+
+Run a 1-question or small-sample benchmark first and inspect recorded usage
+metrics before running all 500 questions.
 
 ### Current Local Metrics
 
