@@ -97,6 +97,7 @@ embed_client = OpenAIEmbeddings(
 # ==========================================
 AGENT_CONFIG_CACHE = None
 LEARNING_SEMAPHORE = asyncio.Semaphore(4)  # 🛠️ NEW: Max 4 concurrent DB saves
+INGESTION_LEARNING_LOCK = asyncio.Lock()
 PENDING_LEARNING_TASKS = set()  # 🛠️ NEW: Tracks active background tasks
 
 
@@ -260,6 +261,78 @@ def unwrap_memory_ingestion_prompt(prompt: str) -> str:
 
     stripped = text.lstrip()
     return stripped[len(MEMORY_INGESTION_PREFIX) :].strip()
+
+
+def wrap_memory_ingestion_payload(payload: str) -> str:
+    """Build a memory-ingestion prompt around an already isolated payload."""
+    return f"{MEMORY_INGESTION_PREFIX}\n\n{str(payload or '').strip()}"
+
+
+def split_memory_ingestion_pairs(prompt: str) -> list[str]:
+    """Split an ingestion payload into chronological user/assistant pairs."""
+    payload = unwrap_memory_ingestion_prompt(prompt)
+    if not payload:
+        return []
+
+    turns: list[dict] = []
+    current_role = None
+    current_lines: list[str] = []
+
+    def flush_turn() -> None:
+        nonlocal current_role, current_lines
+        if current_role and current_lines:
+            turns.append(
+                {
+                    "role": current_role,
+                    "content": "\n".join(current_lines).strip(),
+                }
+            )
+        current_role = None
+        current_lines = []
+
+    for raw_line in payload.splitlines():
+        match = re.match(
+            r"^\s*(user|human|assistant|ai)\s*:\s*(.*)$",
+            raw_line,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            flush_turn()
+            raw_role = match.group(1).lower()
+            current_role = "user" if raw_role in {"user", "human"} else "assistant"
+            current_lines = [match.group(2)]
+            continue
+
+        if current_role:
+            current_lines.append(raw_line)
+        elif raw_line.strip():
+            current_role = "user"
+            current_lines = [raw_line]
+
+    flush_turn()
+
+    if not turns:
+        return [payload.strip()]
+
+    pairs: list[str] = []
+    idx = 0
+    while idx < len(turns):
+        turn = turns[idx]
+
+        if turn["role"] == "user":
+            parts = [f"user: {turn['content']}"]
+            if idx + 1 < len(turns) and turns[idx + 1]["role"] == "assistant":
+                parts.append(f"assistant: {turns[idx + 1]['content']}")
+                idx += 2
+            else:
+                idx += 1
+            pairs.append("\n".join(parts).strip())
+            continue
+
+        pairs.append(f"assistant: {turn['content']}".strip())
+        idx += 1
+
+    return [pair for pair in pairs if pair]
 
 
 def extract_target_queries_from_thinking(text: str) -> list[str]:
@@ -1045,7 +1118,7 @@ class VectorMemoryManager:
                 return str(value)
         return default_time
 
-    async def _execute_mutation_action_locked(self, action: dict) -> int:
+    async def _execute_mutation_action_locked(self, action: dict) -> dict | None:
         act_type = action.get("action", "").upper()
         content = action.get("content", "")
         raw_id = action.get("id")
@@ -1063,15 +1136,15 @@ class VectorMemoryManager:
                 self._rebuild_index()
                 self._save_memories()
                 print(f"🗑️ [Memory] DELETED {self.memory_type} memory: {record_id}")
-                return 1
-            return 0
+                return {"action": "DELETE", "id": record_id}
+            return None
 
         if not content.strip():
-            return 0
+            return None
 
         embedding = await embed_client.aembed_query(text=content)
         if not embedding:
-            return 0
+            return None
 
         vector = self._vector_from_embedding(embedding)
 
@@ -1080,24 +1153,23 @@ class VectorMemoryManager:
                 scores, _ = self.index.search(vector, 1)
                 if scores[0][0] >= 0.95:
                     print(f"🔄 [Memory] Skipped duplicate {self.memory_type} ADD.")
-                    return 0
+                    return None
 
             now = self._action_entry_time(action, self._now())
-            self.memories.append(
-                {
-                    "id": str(uuid.uuid4()),
-                    "agent_id": AGENT_ID,
-                    "memory_type": self.memory_type,
-                    "content": content,
-                    "embedding": embedding,
-                    "created_at": now,
-                    "updated_at": now,
-                }
-            )
+            memory = {
+                "id": str(uuid.uuid4()),
+                "agent_id": AGENT_ID,
+                "memory_type": self.memory_type,
+                "content": content,
+                "embedding": embedding,
+                "created_at": now,
+                "updated_at": now,
+            }
+            self.memories.append(memory)
             self.index.add(vector)
             self._save_memories()
             print(f"✅ [Memory] ADDED {self.memory_type}: {content[:30]}...")
-            return 1
+            return {"action": "ADD", "id": memory["id"], "memory": memory.copy()}
 
         if act_type == "UPDATE" and record_id:
             for memory in self.memories:
@@ -1108,11 +1180,13 @@ class VectorMemoryManager:
                     self._rebuild_index()
                     self._save_memories()
                     print(f"✏️ [Memory] UPDATED {self.memory_type} memory: {record_id}")
-                    return 1
+                    return {"action": "UPDATE", "id": record_id, "memory": memory.copy()}
 
-        return 0
+        return None
 
-    async def _execute_add_batch_locked(self, actions: list[dict], entry_time: str) -> int:
+    async def _execute_add_batch_locked(
+        self, actions: list[dict], entry_time: str
+    ) -> list[dict]:
         unique_actions = []
         seen_contents = {
             re.sub(r"\s+", " ", str(memory.get("content", "")).strip()).lower()
@@ -1133,14 +1207,14 @@ class VectorMemoryManager:
             unique_actions.append((action, content))
 
         if not unique_actions:
-            return 0
+            return []
 
         contents = [content for _, content in unique_actions]
         embeddings = await embed_client.aembed_documents(texts=contents)
         if not embeddings:
-            return 0
+            return []
 
-        added = 0
+        results: list[dict] = []
         now = entry_time or self._now()
 
         for (action, content), embedding in zip(unique_actions, embeddings):
@@ -1156,43 +1230,46 @@ class VectorMemoryManager:
                     continue
 
             created_at = self._action_entry_time(action, now)
-            self.memories.append(
-                {
-                    "id": str(uuid.uuid4()),
-                    "agent_id": AGENT_ID,
-                    "memory_type": self.memory_type,
-                    "content": content,
-                    "embedding": embedding,
-                    "created_at": created_at,
-                    "updated_at": created_at,
-                }
-            )
+            memory = {
+                "id": str(uuid.uuid4()),
+                "agent_id": AGENT_ID,
+                "memory_type": self.memory_type,
+                "content": content,
+                "embedding": embedding,
+                "created_at": created_at,
+                "updated_at": created_at,
+            }
+            self.memories.append(memory)
             self.index.add(vector)
-            added += 1
+            results.append({"action": "ADD", "id": memory["id"], "memory": memory.copy()})
             print(f"✅ [Memory] ADDED {self.memory_type}: {content[:30]}...")
 
-        if added:
+        if results:
             self._save_memories()
 
-        return added
+        return results
 
     @persistent_network_retry(initial_delay=2.0, max_delay=30.0, timeout=30.0)
-    async def execute_actions(self, actions: list[dict], batch_size: int = 32) -> int:
+    async def execute_actions_with_results(
+        self, actions: list[dict], batch_size: int = 32
+    ) -> list[dict]:
         if not actions:
-            return 0
+            return []
 
-        executed = 0
+        results: list[dict] = []
         default_entry_time = self._now()
         add_buffer = []
         add_buffer_time = None
 
         async def flush_adds() -> None:
-            nonlocal executed, add_buffer, add_buffer_time
+            nonlocal results, add_buffer, add_buffer_time
             if not add_buffer:
                 return
 
             async with self.lock:
-                executed += await self._execute_add_batch_locked(add_buffer, add_buffer_time)
+                results.extend(
+                    await self._execute_add_batch_locked(add_buffer, add_buffer_time)
+                )
 
             add_buffer = []
             add_buffer_time = None
@@ -1217,10 +1294,16 @@ class VectorMemoryManager:
             await flush_adds()
 
             async with self.lock:
-                executed += await self._execute_mutation_action_locked(action)
+                result = await self._execute_mutation_action_locked(action)
+                if result:
+                    results.append(result)
 
         await flush_adds()
-        return executed
+        return results
+
+    async def execute_actions(self, actions: list[dict], batch_size: int = 32) -> int:
+        results = await self.execute_actions_with_results(actions, batch_size=batch_size)
+        return len(results)
 
     async def execute_action(self, action: dict):
         return await self.execute_actions([action], batch_size=1)
@@ -1491,6 +1574,158 @@ def format_memory_context_for_prompt(memory_block: str, keep_ids: bool = False) 
     return "\n".join(output) if output else "None"
 
 
+MEMORY_CONTEXT_ID_RE = re.compile(r"\[ID:\s*([0-9a-fA-F\-]{36})\]")
+
+
+def new_vector_staging_state() -> dict:
+    return {"adds": {}, "updates": {}, "deletes": set()}
+
+
+def extract_action_record_id(action: dict) -> str | None:
+    raw_id = action.get("id")
+    if not raw_id:
+        return None
+
+    match = re.search(r"([0-9a-fA-F\-]{36})", str(raw_id))
+    return match.group(1) if match else None
+
+
+def format_staged_memory_line(memory_id: str, created_at: str, content: str) -> str:
+    return f"[STORED_AT: {created_at}] [ID: {memory_id}] {content}"
+
+
+def stage_vector_actions_on_context(
+    current_context: str,
+    actions: list[dict],
+    db: VectorMemoryManager,
+    staged_state: dict,
+    max_lines: int = 70,
+) -> str:
+    """Stage vector actions in RAM and return the updated prompt context."""
+    line_by_id: dict[str, str] = {}
+    passthrough_lines: list[str] = []
+
+    for raw_line in str(current_context or "").splitlines():
+        line = raw_line.strip()
+        if not line or line == "None":
+            continue
+
+        match = MEMORY_CONTEXT_ID_RE.search(line)
+        if match:
+            line_by_id[match.group(1)] = line
+        else:
+            passthrough_lines.append(line)
+
+    adds = staged_state.setdefault("adds", {})
+    updates = staged_state.setdefault("updates", {})
+    deletes = staged_state.setdefault("deletes", set())
+
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+
+        action_type = str(action.get("action", "")).upper()
+        content = re.sub(r"\s+", " ", str(action.get("content", "")).strip())
+
+        if action_type == "ADD":
+            if not content:
+                continue
+
+            memory_id = str(uuid.uuid4())
+            created_at = db._action_entry_time(action, db._now())
+            adds[memory_id] = {"content": content, "created_at": created_at}
+            line_by_id[memory_id] = format_staged_memory_line(
+                memory_id, created_at, content
+            )
+            continue
+
+        record_id = extract_action_record_id(action)
+        if not record_id:
+            continue
+
+        if action_type == "DELETE":
+            if record_id in adds:
+                adds.pop(record_id, None)
+            else:
+                deletes.add(record_id)
+                updates.pop(record_id, None)
+            line_by_id.pop(record_id, None)
+            continue
+
+        if action_type == "UPDATE" and content:
+            if record_id in adds:
+                created_at = adds[record_id].get("created_at") or db._now()
+                adds[record_id] = {"content": content, "created_at": created_at}
+                line_by_id[record_id] = format_staged_memory_line(
+                    record_id, created_at, content
+                )
+                continue
+
+            if record_id in deletes:
+                continue
+
+            updates[record_id] = {"content": content}
+            created_at = db._now()
+            existing_line = line_by_id.get(record_id, "")
+            stored_at_match = re.search(r"\[STORED_AT:\s*([^\]]+)\]", existing_line)
+            if stored_at_match:
+                created_at = stored_at_match.group(1)
+            line_by_id[record_id] = format_staged_memory_line(
+                record_id, created_at, content
+            )
+
+    combined = "\n".join(passthrough_lines + list(line_by_id.values()))
+    if not combined.strip():
+        return ""
+
+    return sort_memories_by_recency(combined, max_lines=max_lines)
+
+
+def build_staged_vector_commit_actions(staged_state: dict) -> list[dict]:
+    actions: list[dict] = []
+    deletes = staged_state.get("deletes", set())
+    updates = staged_state.get("updates", {})
+    adds = staged_state.get("adds", {})
+
+    for record_id in deletes:
+        actions.append({"action": "DELETE", "id": record_id})
+
+    for record_id, data in updates.items():
+        if record_id in deletes:
+            continue
+        content = str(data.get("content", "")).strip()
+        if content:
+            actions.append({"action": "UPDATE", "id": record_id, "content": content})
+
+    for data in adds.values():
+        content = str(data.get("content", "")).strip()
+        if not content:
+            continue
+        action = {"action": "ADD", "content": content}
+        if data.get("created_at"):
+            action["created_at"] = data["created_at"]
+        actions.append(action)
+
+    return actions
+
+
+def add_token_metrics(total: dict, metrics: dict) -> dict:
+    """Accumulate token usage dictionaries without assuming all keys exist."""
+    for key in ("input", "output", "total"):
+        total[key] = total.get(key, 0) + int((metrics or {}).get(key, 0) or 0)
+    return total
+
+
+def debug_json(value) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+
+
+def debug_memory_block(label: str, value: str) -> None:
+    clean_value = str(value or "").strip()
+    print(f"\n[{label}]")
+    print(clean_value if clean_value else "None")
+
+
 # ==========================================
 # 4. GRAPH STATE
 # ==========================================
@@ -1519,6 +1754,16 @@ async def retrieve_memories_node(state: AgentState):
 
     # 🛠️ BENCHMARK SYNC: If this is a final benchmark question, wait for all background memories to save FIRST!
     global PENDING_LEARNING_TASKS
+    if (
+        state.get("channel_type") == "benchmark"
+        and is_memory_ingestion_prompt(state.get("user_prompt", ""))
+        and INGESTION_LEARNING_LOCK.locked()
+    ):
+        print("⏳ [Benchmark Ingestion] Waiting for previous ingestion learning before retrieval...")
+        async with INGESTION_LEARNING_LOCK:
+            pass
+        print("✅ [Benchmark Ingestion] Previous ingestion learning finished. Proceeding with retrieval.")
+
     if state.get("skip_learning", False) and PENDING_LEARNING_TASKS:
         print(
             f"⏳ [Benchmark Sync] Waiting for {len(PENDING_LEARNING_TASKS)} background chunks to finish saving to DB..."
@@ -2634,9 +2879,25 @@ User question at this time ({current_time_str}):
     # 🚀 NEW: FIRE BACKGROUND LEARNING TO REDUCE LATENCY
     if not state.get("skip_learning", False):
 
+        is_ingestion_learning = is_memory_ingestion_prompt(state["user_prompt"])
+        run_ingestion_inline = (
+            state.get("channel_type") == "benchmark" and is_ingestion_learning
+        )
         
         # Define a safe wrapper that respects the 4-task limit
         async def bounded_learning():
+            if is_ingestion_learning:
+                async with INGESTION_LEARNING_LOCK:
+                    await background_memory_update(
+                        state["user_prompt"],
+                        final_output,
+                        sem_ctx_to_save,  # 🛠️ Pass updated Semantic context here
+                        epi_ctx_to_save,  # 🛠️ Pass updated Episodic context here
+                        state.get("procedural_context", ""),
+                        state.get("current_date")
+                    )
+                return
+
             async with LEARNING_SEMAPHORE:
                 await background_memory_update(
                     state["user_prompt"],
@@ -2646,11 +2907,15 @@ User question at this time ({current_time_str}):
                     state.get("procedural_context", ""),
                     state.get("current_date")
                 )
-        
-        # Fire-and-forget, but track it in the global set
-        task = asyncio.create_task(bounded_learning())
-        PENDING_LEARNING_TASKS.add(task)
-        task.add_done_callback(PENDING_LEARNING_TASKS.discard)
+
+        if run_ingestion_inline:
+            print("🧠 [Benchmark Ingestion] Running learning inline before returning response.")
+            await bounded_learning()
+        else:
+            # Fire-and-forget, but track it in the global set
+            task = asyncio.create_task(bounded_learning())
+            PENDING_LEARNING_TASKS.add(task)
+            task.add_done_callback(PENDING_LEARNING_TASKS.discard)
 
     # 🛠️ RETURN THE UPDATED CONTEXTS SO LANGGRAPH STATE UPDATES EVERYWHERE
     return {
@@ -2673,7 +2938,10 @@ async def learn_vector_memory(
     current_context: str,
     current_date: str = None, 
     related_context: str = "",
-) -> tuple[str, dict]:
+    return_action_results: bool = False,
+    return_actions: bool = False,
+    execute_mutations: bool = True,
+) -> tuple[int, dict] | tuple[int, dict, list[dict]] | tuple[int, dict, list[dict], list[dict]]:
     """Extracts facts/episodes with strict isolation and an importance threshold."""
 
     if memory_type == "Semantic":
@@ -2750,15 +3018,7 @@ async def learn_vector_memory(
 
     artifact_source_text = f"{source_user_prompt}\n\n{source_ai_response}".strip()
 
-    structured_artifact_memories = (
-        extract_structured_artifact_memories(
-            artifact_source_text,
-            current_time,
-            artifact_context,
-        )
-        if memory_type == "Episodic"
-        else []
-    )
+    structured_artifact_memories = []
 
     structured_artifact_section = (
         "\n".join(f"- {m}" for m in structured_artifact_memories)
@@ -2797,13 +3057,6 @@ async def learn_vector_memory(
     Interaction:
     {"Conversation history to remember" if ingestion_turn else "User"}: {source_user_prompt}
     This is AI response to user message: {source_ai_response if source_ai_response else "(fixed ingestion acknowledgement omitted)"}
-
-    STRUCTURED ARTIFACT UNITS:
-    {structured_artifact_section}
-
-    If STRUCTURED ARTIFACT UNITS is not None, each listed unit is mandatory evidence.
-    Preserve each unit as its own ADD action unless the same unit already exists and should be updated.
-    Do not replace structured artifact units with only a broad summary.
 
     CRITICAL TIME RESOLUTION: The current system time is {current_time}. 
     If the user uses relative time words (e.g., "yesterday", "last month", "tomorrow"), you MUST convert them into absolute dates within the "content" string you generate.
@@ -2962,6 +3215,8 @@ async def learn_vector_memory(
 
 
     actions_executed = 0
+    action_results: list[dict] = []
+    parsed_actions: list[dict] = []
 
     if (
         (content and content.upper() != "NONE" and content != '{"actions": []}')
@@ -2973,8 +3228,7 @@ async def learn_vector_memory(
             data = json.loads(json_str) if json_str else {"actions": []}
             actions = data.get("actions", [])
 
-            # print("actions:")
-            # print(actions)
+            
 
             if memory_type == "Episodic":
                 existing_contents = {
@@ -2987,7 +3241,11 @@ async def learn_vector_memory(
                         actions.append({"action": "ADD", "content": memory})
                         existing_contents.add(memory)
 
-            actions_executed += await db.execute_actions(actions)
+            parsed_actions = [act for act in actions if isinstance(act, dict)]
+            if execute_mutations:
+                results = await db.execute_actions_with_results(parsed_actions)
+                actions_executed += len(results)
+                action_results.extend(results)
 
         except json.JSONDecodeError:
             # 2. FALLBACK PARSER: If the LLM just dumped raw text instead of JSON
@@ -3013,11 +3271,24 @@ async def learn_vector_memory(
                 for line in lines
                 if line.strip()
             ]
-            actions_executed += await db.execute_actions(fallback_actions)
+            parsed_actions = fallback_actions
+            if execute_mutations:
+                results = await db.execute_actions_with_results(fallback_actions)
+                actions_executed += len(results)
+                action_results.extend(results)
 
         except Exception as e:
             print(f"❌ [Error] Memory Execution failed: {e}")
             raise e  # 🛠️ ADD THIS: Signal the decorator to retry the whole process
+
+    if return_action_results and return_actions:
+        return actions_executed, m, action_results, parsed_actions
+
+    if return_action_results:
+        return actions_executed, m, action_results
+
+    if return_actions:
+        return actions_executed, m, parsed_actions
 
     return actions_executed, m
 
@@ -3371,44 +3642,207 @@ async def learn_procedural_memory(
     return actions_executed, m
 
 
+def has_memory_context(context: str) -> bool:
+    return bool(str(context or "").strip() and str(context).strip() != "None")
+
+
+async def learn_ingestion_memory_pairs(
+    user_prompt: str,
+    ai_resp: str,
+    semantic_ctx: str,
+    episodic_ctx: str,
+    procedural_ctx: str,
+    current_date: str = None,
+) -> list[tuple[int, dict]]:
+    """Learn ingestion/history chunks one user-assistant pair at a time."""
+    pair_payloads = split_memory_ingestion_pairs(user_prompt)
+    if not pair_payloads:
+        zero = {"input": 0, "output": 0, "total": 0}
+        return [(0, zero.copy()), (0, zero.copy()), (0, zero.copy())]
+
+    working_semantic_ctx = semantic_ctx or ""
+    working_episodic_ctx = episodic_ctx or ""
+    working_procedural_ctx = procedural_ctx or ""
+
+    semantic_stage = new_vector_staging_state()
+    episodic_stage = new_vector_staging_state()
+
+    semantic_count = 0
+    episodic_count = 0
+    procedural_count = 0
+
+    semantic_tokens = {"input": 0, "output": 0, "total": 0}
+    episodic_tokens = {"input": 0, "output": 0, "total": 0}
+    procedural_tokens = {"input": 0, "output": 0, "total": 0}
+
+    print("\n" + "=" * 80)
+    print(f"🧠 [Ingestion Learning] Split chunk into {len(pair_payloads)} pair(s).")
+    print("🧠 [Ingestion Learning] Vector memories will be staged in RAM and committed after all pairs.")
+    print("=" * 80)
+
+    for pair_index, pair_payload in enumerate(pair_payloads, start=1):
+        pair_prompt = wrap_memory_ingestion_payload(pair_payload)
+
+        print("\n" + "-" * 80)
+        print(f"🧠 [Ingestion Learning] Feeding pair {pair_index}/{len(pair_payloads)}")
+        print("[Pair Payload]")
+        print(pair_payload)
+        debug_memory_block("Working Semantic BEFORE pair", working_semantic_ctx)
+        debug_memory_block("Working Episodic BEFORE pair", working_episodic_ctx)
+        debug_memory_block("Working Procedural BEFORE pair", working_procedural_ctx)
+
+        semantic_related_ctx = (
+            f"[Episodic]\n{working_episodic_ctx}"
+            if has_memory_context(working_episodic_ctx)
+            else ""
+        )
+        episodic_related_ctx = (
+            f"[Semantic]\n{working_semantic_ctx}"
+            if has_memory_context(working_semantic_ctx)
+            else ""
+        )
+
+        pair_results = await asyncio.gather(
+            learn_vector_memory(
+                semantic_db,
+                "Semantic",
+                pair_prompt,
+                ai_resp,
+                working_semantic_ctx,
+                current_date,
+                semantic_related_ctx,
+                return_actions=True,
+                execute_mutations=False,
+            ),
+            learn_vector_memory(
+                episodic_db,
+                "Episodic",
+                pair_prompt,
+                ai_resp,
+                working_episodic_ctx,
+                current_date,
+                episodic_related_ctx,
+                return_actions=True,
+                execute_mutations=False,
+            ),
+            learn_procedural_memory(pair_prompt, ai_resp, working_procedural_ctx),
+        )
+
+        _, sem_metrics, sem_actions = pair_results[0]
+        _, epi_metrics, epi_actions = pair_results[1]
+        pro_count, pro_metrics = pair_results[2]
+
+        print(f"\n[Pair {pair_index}/{len(pair_payloads)} Semantic Actions]")
+        print(debug_json(sem_actions))
+        print(f"\n[Pair {pair_index}/{len(pair_payloads)} Episodic Actions]")
+        print(debug_json(epi_actions))
+        print(f"\n[Pair {pair_index}/{len(pair_payloads)} Procedural Changes]")
+        print(pro_count)
+
+        procedural_count += pro_count
+
+        add_token_metrics(semantic_tokens, sem_metrics)
+        add_token_metrics(episodic_tokens, epi_metrics)
+        add_token_metrics(procedural_tokens, pro_metrics)
+
+        working_semantic_ctx = stage_vector_actions_on_context(
+            working_semantic_ctx,
+            sem_actions,
+            semantic_db,
+            semantic_stage,
+            max_lines=70,
+        )
+        working_episodic_ctx = stage_vector_actions_on_context(
+            working_episodic_ctx,
+            epi_actions,
+            episodic_db,
+            episodic_stage,
+            max_lines=70,
+        )
+
+        if pro_count:
+            all_rules = await load_procedural_rules()
+            working_procedural_ctx = get_formatted_rules_with_ids(all_rules, limit=15)
+
+        debug_memory_block("Working Semantic AFTER pair", working_semantic_ctx)
+        debug_memory_block("Working Episodic AFTER pair", working_episodic_ctx)
+        debug_memory_block("Working Procedural AFTER pair", working_procedural_ctx)
+        print(f"🧠 [Ingestion Learning] Pair {pair_index}/{len(pair_payloads)} complete; updated working memory will be passed to the next pair.")
+        print("-" * 80)
+
+    semantic_commit_actions = build_staged_vector_commit_actions(semantic_stage)
+    episodic_commit_actions = build_staged_vector_commit_actions(episodic_stage)
+
+    print("\n" + "=" * 80)
+    print("🧠 [Ingestion Learning] All pairs complete. Final working memories before DB commit:")
+    debug_memory_block("Final Working Semantic", working_semantic_ctx)
+    debug_memory_block("Final Working Episodic", working_episodic_ctx)
+    debug_memory_block("Final Working Procedural", working_procedural_ctx)
+    print("\n[Final Semantic Actions Committed To DB]")
+    print(debug_json(semantic_commit_actions))
+    print("\n[Final Episodic Actions Committed To DB]")
+    print(debug_json(episodic_commit_actions))
+    print("=" * 80)
+
+    semantic_commit, episodic_commit = await asyncio.gather(
+        semantic_db.execute_actions_with_results(semantic_commit_actions),
+        episodic_db.execute_actions_with_results(episodic_commit_actions),
+    )
+    semantic_count = len(semantic_commit)
+    episodic_count = len(episodic_commit)
+
+    print("\n" + "=" * 80)
+    print(f"🧠 [Ingestion Learning] DB commit complete: Semantic={semantic_count}, Episodic={episodic_count}, Procedural={procedural_count}")
+    print("=" * 80)
+
+    return [
+        (semantic_count, semantic_tokens),
+        (episodic_count, episodic_tokens),
+        (procedural_count, procedural_tokens),
+    ]
+
+
 async def update_memories_node(state: AgentState):
     start_time = time.time()
 
     u_prompt = state["user_prompt"]
     ai_resp = state["final_response"]
 
-    results = await asyncio.gather(
-        learn_vector_memory(
-            semantic_db,
-            "Semantic",
+    if is_memory_ingestion_prompt(u_prompt):
+        results = await learn_ingestion_memory_pairs(
             u_prompt,
             ai_resp,
             state.get("semantic_context", ""),
-            state.get("current_date"),
-        ),
-        learn_vector_memory(
-            episodic_db,
-            "Episodic",
-            u_prompt,
-            ai_resp,
             state.get("episodic_context", ""),
+            state.get("procedural_context", ""),
             state.get("current_date"),
-        ),
-        learn_broad_episodic_memory(
-            u_prompt,
-            ai_resp,
-            state.get("episodic_context", ""),
-            state.get("current_date"),
-            f"[Semantic]\n{state.get('semantic_context', '')}" if state.get("semantic_context") else "",
-        ),
-        learn_procedural_memory(u_prompt, ai_resp, state.get("procedural_context", "")),
-    )
+        )
+    else:
+        results = await asyncio.gather(
+            learn_vector_memory(
+                semantic_db,
+                "Semantic",
+                u_prompt,
+                ai_resp,
+                state.get("semantic_context", ""),
+                state.get("current_date"),
+            ),
+            learn_vector_memory(
+                episodic_db,
+                "Episodic",
+                u_prompt,
+                ai_resp,
+                state.get("episodic_context", ""),
+                state.get("current_date"),
+            ),
+            learn_procedural_memory(u_prompt, ai_resp, state.get("procedural_context", "")),
+        )
 
     # Unpack the tuples
     sem_content, sem_tokens = results[0]
     epi_content, epi_tokens = results[1]
-    broad_epi_content, broad_epi_tokens = results[2]
-    pro_content, pro_tokens = results[3]
+    broad_epi_content, broad_epi_tokens = "", {"input": 0, "output": 0}
+    pro_content, pro_tokens = results[2]
 
     # Unpack and Sum
     total_in = sum(r[1]["input"] for r in results)
@@ -3456,30 +3890,33 @@ async def background_memory_update(
     semantic_related_ctx = f"[Episodic]\n{episodic_ctx}" if episodic_ctx else ""
     episodic_related_ctx = f"[Semantic]\n{semantic_ctx}" if semantic_ctx else ""
 
-    results = await asyncio.gather(
-        learn_vector_memory(
-            semantic_db, "Semantic", user_prompt, ai_resp, semantic_ctx, current_date,semantic_related_ctx
-        ),
-        learn_vector_memory(
-            episodic_db, "Episodic", user_prompt, ai_resp, episodic_ctx, current_date,episodic_related_ctx
-        ),
-        learn_broad_episodic_memory(
+    if is_memory_ingestion_prompt(user_prompt):
+        results = await learn_ingestion_memory_pairs(
             user_prompt,
             ai_resp,
+            semantic_ctx,
             episodic_ctx,
+            procedural_ctx,
             current_date,
-            episodic_related_ctx,
-        ),
-        learn_procedural_memory(user_prompt, ai_resp, procedural_ctx),
-    )
+        )
+    else:
+        results = await asyncio.gather(
+            learn_vector_memory(
+                semantic_db, "Semantic", user_prompt, ai_resp, semantic_ctx, current_date,semantic_related_ctx
+            ),
+            learn_vector_memory(
+                episodic_db, "Episodic", user_prompt, ai_resp, episodic_ctx, current_date,episodic_related_ctx
+            ),
+            learn_procedural_memory(user_prompt, ai_resp, procedural_ctx),
+        )
 
     # print("result:" ,results)
 
     # Unpack the tuples
     sem_content, sem_tokens = results[0]
     epi_content, epi_tokens = results[1]
-    broad_epi_content, broad_epi_tokens = results[2]
-    pro_content, pro_tokens = results[3]
+    broad_epi_content, broad_epi_tokens = "", {"input": 0, "output": 0}
+    pro_content, pro_tokens = results[2]
 
     total_in = sum(r[1]["input"] for r in results)
     total_out = sum(r[1]["output"] for r in results)
