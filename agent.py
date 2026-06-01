@@ -1357,6 +1357,33 @@ def save_procedural_rules(valid_rules: list):
 async def clear_procedural_rules():
     await asyncio.to_thread(_save_rules_file, [])
 
+
+async def wait_for_pending_learning_before_wipe():
+    """Let in-flight background learning finish before an API-triggered wipe."""
+    global PENDING_LEARNING_TASKS
+
+    if not PENDING_LEARNING_TASKS:
+        return
+
+    pending_tasks = list(PENDING_LEARNING_TASKS)
+    print(
+        f"⏳ [Memory Wipe] Waiting for {len(pending_tasks)} pending learning tasks..."
+    )
+    results = await asyncio.gather(*pending_tasks, return_exceptions=True)
+    failures = [result for result in results if isinstance(result, Exception)]
+
+    if failures:
+        print(
+            f"⚠️ [Memory Wipe] {len(failures)} pending learning task(s) failed before wipe."
+        )
+
+
+async def wipe_all_memories_for_api():
+    """API-safe memory wipe used by benchmark/external callers."""
+    await wait_for_pending_learning_before_wipe()
+    await wipe_all_memories()
+
+
 async def wipe_all_memories():
     """Wipes all vectors and rules for this agent from the DB."""
     try:
