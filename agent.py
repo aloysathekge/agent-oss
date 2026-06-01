@@ -7,7 +7,7 @@ import re
 import numpy as np
 import faiss
 from datetime import datetime
-from typing import NotRequired, TypedDict, Sequence
+from typing import TypedDict, Sequence
 from dotenv import load_dotenv
 import shutil
 import time
@@ -1509,7 +1509,6 @@ class AgentState(TypedDict):
     channel_type: str  # NEW: e.g., 'telegram', 'whatsapp', 'terminal'
     metrics: dict
     current_date: str  # 🛠️ ADDED: To explicitly pass the benchmark date
-    benchmark_question_type: NotRequired[str]
 
 
 # ==========================================
@@ -1531,7 +1530,6 @@ async def retrieve_memories_node(state: AgentState):
     out_tokens = 0
 
     user_prompt = state["user_prompt"]
-    benchmark_question_type = state.get("benchmark_question_type", "") or ""
     history_text = "\n".join(
         [f"{msg.type}: {msg.content}" for msg in state["chat_history"][-5:]]
     )
@@ -1542,11 +1540,9 @@ async def retrieve_memories_node(state: AgentState):
     else:
         current_time_str = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
-    preference_hyde_hint = ""
-    if "preference" in benchmark_question_type.lower():
-        preference_hyde_hint = """
-    This question is a user preference question. Generate queries and keywords to retrieve the user's likes, dislikes, preferences, constraints, avoidances, and related preference signals based on the user's prompt.
-        """.rstrip()
+    preference_hyde_hint = """
+    If the user's prompt asks for a preference, recommendation, advice, suggestion, or choice, generate queries and keywords to retrieve the user's likes, dislikes, preferences, constraints, avoidances, and related preference signals.
+    """.rstrip()
 
     hyde_prompt = f"""
     You are an AI Search Query Optimizer. 
@@ -2070,13 +2066,9 @@ async def generate_response_node(state: AgentState):
     }}
     """
 
-    preference_answer_hint = ""
-    if "preference" in (state.get("benchmark_question_type") or "").lower():
-        preference_answer_hint = """
-        [BENCHMARK QUESTION TYPE HINT]
-        This is a user preference/advice question.
-
-        The agent_response MUST answer as a personalized recommendation, not as a neutral factual summary.
+    preference_answer_hint = """
+        [QUESTION-TYPE GUIDANCE]
+        If the user asks for a preference, recommendation, advice, suggestion, or choice, answer as a personalized recommendation rather than a neutral factual summary.
         Start the answer with preference-oriented wording such as "Based on your preferences...", "Given your preferences...", "You would likely prefer...", or "My recommendation would be...".
 
         Use retrieved likes, dislikes, preferences, constraints, avoidances, current pain points, workarounds, priorities, recent purchases, and desired outcomes as evidence.
@@ -2085,22 +2077,18 @@ async def generate_response_node(state: AgentState):
         Do not introduce wait-for-sale, budget, new-model, or delay advice unless retrieved evidence supports that concern.
         """.rstrip()
 
-    knowledge_update_answer_hint = ""
-    if "knowledge-update" in (state.get("benchmark_question_type") or "").lower():
-        knowledge_update_answer_hint = """
-        [BENCHMARK QUESTION TYPE HINT]
-        This is a knowledge-update question. Expect that older memories may be superseded, modified, or contextualized by later memories about the same target.
+    knowledge_update_answer_hint = """
+        [QUESTION-TYPE GUIDANCE]
+        If the user asks a knowledge-update or current-state question, expect that older memories may be superseded, modified, or contextualized by later memories about the same target.
         Reconstruct the target's timeline and answer with the latest supported state interpretation.
         If the user asks a current-state question, use the user question time as the anchor unless another anchor is stated.
         If a newer same-target update is an intention/plan with a concrete target state and its effective date/window is before the anchor, include that newer intended state first and mention the older confirmed state as prior context instead of answering only with the older state.
         """.rstrip()
 
-    assistant_recall_answer_hint = ""
-    if "assistant" in (state.get("benchmark_question_type") or "").lower():
-        assistant_recall_answer_hint = """
-        [BENCHMARK QUESTION TYPE HINT]
-        This is a recall question about information the assistant previously provided.
-        Treat assistant-provided facts in episodic memory as valid evidence, including factual list items, study details, counts, sample sizes, journal names, article titles, examples, and recommendations.
+    assistant_recall_answer_hint = """
+        [QUESTION-TYPE GUIDANCE]
+        If the user asks a recall question about information the assistant previously provided, treat assistant-provided facts in episodic memory as valid evidence.
+        This includes factual list items, study details, counts, sample sizes, journal names, article titles, examples, recommendations, ordered sequences, tables, and route or step details.
         Do not reject evidence merely because it came from an assistant answer rather than a user statement.
         """.rstrip()
 

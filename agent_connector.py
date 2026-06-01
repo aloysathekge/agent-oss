@@ -19,7 +19,7 @@ async def get_quarq_response(
     user_id: str, 
     channel_type: str,
     skip_learning: bool = False,
-    current_date: Optional[str] = None
+    current_date: Optional[str] = None,
 ) -> Tuple[str, dict,dict]:
     """
     Public API to invoke the Quarq Agent.
@@ -69,4 +69,3 @@ async def get_quarq_response(
         print(f"❌ [Error in Agent Connector]: {str(e)}")
         # Provide a graceful fallback response if the orchestration graph crashes
         return "I'm sorry, I encountered an internal error while processing your request. Please try again.", {}, {}
-

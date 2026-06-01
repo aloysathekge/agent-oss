@@ -41,7 +41,6 @@ class ChatRequest(BaseModel):
     channel_type: str = "web"
     skip_learning: bool = False
     current_date: Optional[str] = None
-    benchmark_question_type: str = ""
 
 
 @app.get("/")
@@ -62,7 +61,6 @@ async def chat(req: ChatRequest):
             chat_history=[],
             skip_learning=req.skip_learning,
             current_date=req.current_date,
-            benchmark_question_type=req.benchmark_question_type,
         )
         return {"response": response, "metrics": metrics, "contexts": contexts}
     except Exception as e:
