@@ -6,9 +6,9 @@ Quarq Agent is a memory-first AI agent built by QuarqLabs for long-context perso
 
 It is designed as an open, inspectable alternative to memory agents such as Hermes or OpenClaw, with a stronger emphasis on durable local memory, strict attribution, self-correcting retrieval, and benchmark-grade long-term recall.
 
-The current local implementation includes the structured artifact learning pipeline in `agent.py`. Normal prose learning still runs as before, while tables, lists, artifact blocks, quotes, budgets, timelines, metrics, ratios, and other compact evidence formats are extracted into deterministic memory units.
+The current local implementation keeps normal semantic, episodic, and procedural learning in `agent.py`. Deterministic structured-artifact extractor code exists in the repo, but it is disabled in the active learning path while benchmark memory quality is being tuned.
 
-Local LongMemEval-S reports are checkpoints while extractor behavior is being validated. Treat checked-in report files as local progress snapshots, not final published benchmark numbers.
+Local LongMemEval-S reports are checkpoints while learning and generation behavior is being validated. Treat checked-in report files as local progress snapshots, not final published benchmark numbers.
 
 Benchmark cost warning: a full 500-question LongMemEval-S run with the current model mix has cost about `$2,500` in practice, or about `$5` per average question. Run a 1-question or small-sample benchmark first before starting the full dataset.
 
@@ -19,7 +19,7 @@ Benchmark cost warning: a full 500-question LongMemEval-S run with the current m
 - [Highlights](#highlights)
 - [Architecture](#architecture)
 - [Memory System](#memory-system)
-- [Structured Artifact Learning](#structured-artifact-learning)
+- [Structured Artifact Extractors](#structured-artifact-extractors)
 - [Local Storage Layout](#local-storage-layout)
 - [Retrieval Pipeline](#retrieval-pipeline)
 - [Temporal Reasoning](#temporal-reasoning)
@@ -53,7 +53,7 @@ Quarq combines:
 - dynamic recall depth
 - strict temporal grounding
 - numeric attribution and exact aggregation rules
-- structured artifact extraction for table rows, lists, blocks, quotes, budgets, timelines, metrics, ratios, and other evidence-shaped outputs
+- structured artifact extractor code for table rows, lists, blocks, quotes, budgets, timelines, metrics, ratios, and other evidence-shaped outputs, currently disabled in the active learning path
 - self-correcting fallback retrieval
 - background memory consolidation
 - LangGraph orchestration
@@ -85,11 +85,12 @@ Quarq directly attacks those failure modes with retrieval decomposition, evidenc
 - Required-data fallback: the model can request a targeted second retrieval pass when evidence is missing.
 - Temporal truth protocol: separates database storage time from narrative event time.
 - Quantitative fidelity: numbers are stored and used with owner, property, item, and exactness.
-- Structured artifact learning: high-signal rows and items are learned as separate deterministic memories without removing the normal prose learning path.
-- Duplicate protection: batch writes skip exact duplicate content before embedding, then use the normal vector duplicate check so structured extraction does not flood memory with repeated rows.
-- Background learning: user responses return immediately while memory extraction runs asynchronously.
+- Benchmark ingestion learning: history chunks are split into individual user/assistant pairs, learned sequentially, staged in RAM between pairs, and committed after the chunk is complete.
+- Duplicate protection: batch writes skip exact duplicate content before embedding, then use the normal vector duplicate check to avoid repeated memories.
+- Background learning: normal user responses return immediately while memory extraction runs asynchronously.
+- Benchmark ingestion synchronization: benchmark memory-ingestion turns learn synchronously before returning, guarded by an ingestion lock.
 - Progressive tool loading: tool docs are only injected when a skill is selected.
-- Benchmark mode: disables tool routing and waits for pending background learning before final evaluation.
+- Benchmark mode: disables tool routing, synchronously learns memory-ingestion chunks, and waits for any pending learning before final evaluation.
 
 ## Architecture
 
@@ -117,7 +118,9 @@ LangGraph StateGraph
           +-- grounded answer synthesis
           +-- optional ReAct tool loop
           +-- REQUIRED_DATA fallback retrieval
-          +-- background memory learning
+          +-- memory learning
+                +-- normal chat: background async
+                +-- benchmark ingestion: inline sync
 ```
 
 The graph is intentionally compact:
@@ -126,7 +129,7 @@ The graph is intentionally compact:
 START -> retrieve_memories -> route_tools -> generate_response -> END
 ```
 
-Learning is launched in the background from `generate_response`, which keeps the interactive path fast while still preserving durable memory.
+Learning is launched from `generate_response`. Normal chat keeps the interactive path fast by learning in the background. Benchmark memory-ingestion prompts learn inline before the response returns so the next history chunk retrieves against the latest committed memories.
 
 ## Memory System
 
@@ -180,11 +183,13 @@ Procedural memory stores behavioral rules:
 
 Procedural rules are tagged and routed, so the model sees only the relevant rules for the current prompt instead of carrying every rule forever.
 
-## Structured Artifact Learning
+## Structured Artifact Extractors
 
 The local agent keeps the original normal-text learning path intact. Full user and assistant turns are still passed to the learning model, so ordinary narrative details, decisions, preferences, and summaries can become semantic, episodic, or procedural memories.
 
-Structured extractors run beside that path for artifact-shaped content that summarization can otherwise compress too aggressively. They create deterministic episodic units for high-signal data such as:
+Structured extractor code is present for artifact-shaped content that summarization can otherwise compress too aggressively. In the current active runtime, these extractors are disabled and their outputs are not injected into the learning prompt or appended to episodic memory. This keeps benchmark learning focused on the model-generated memory actions from the actual user/assistant pair.
+
+When enabled experimentally, the extractor layer can create deterministic episodic units for high-signal data such as:
 
 - markdown table rows
 - explicit artifact blocks such as `::title:: == description`
@@ -202,7 +207,7 @@ Structured extractors run beside that path for artifact-shaped content that summ
 
 The extractor layer is intentionally capped and high-signal. It is not meant to memorize every sentence. Its job is to preserve compact data-bearing rows and items that future recall questions often target verbatim.
 
-Extracted units are injected into the learning prompt as `STRUCTURED ARTIFACT UNITS` and appended as episodic `ADD` actions when the learning model omits them. They still pass through the normal local `execute_actions` path, including exact duplicate blocking, batch embedding, and vector duplicate checks.
+In the current runtime, `STRUCTURED ARTIFACT UNITS` are not passed to the learning prompt. Vector writes still pass through the normal local action execution path, including exact duplicate blocking, batch embedding, and vector duplicate checks.
 
 ## Local Storage Layout
 
@@ -340,14 +345,15 @@ This makes the agent aggressive about recall but conservative about truth.
 
 ## Learning Pipeline
 
-After every non-benchmark response, Quarq starts background learning.
+After every normal response, Quarq starts background learning.
+
+Benchmark memory-ingestion prompts are the exception. They are learned synchronously before the ingestion response returns, so `run_dataset_evals.py` does not feed the next history chunk until the previous chunk has been learned and committed.
 
 The learning model extracts:
 
 - semantic memories
 - episodic memories
 - procedural rules
-- structured artifact units from high-signal tables, lists, blocks, and row-like content
 
 It can issue:
 
@@ -370,14 +376,18 @@ Important learning behaviors:
 - avoids duplicate memories across semantic and episodic layers
 - prefers exact values over approximate or bounded restatements
 - updates existing records instead of creating conflicting duplicates
-- keeps normal prose learning active even when structured extractors also find tables, lists, blocks, or other artifact units
-- uses exact duplicate blocking and capped deterministic extraction to keep structured memories controlled
+- keeps normal prose learning active
+- splits benchmark ingestion chunks into individual user/assistant pairs
+- stages semantic and episodic `ADD`, `UPDATE`, and `DELETE` actions in RAM between pairs
+- commits staged semantic and episodic vector actions after all pairs in the chunk have been processed
+- reloads procedural context between ingestion pairs when procedural rules change
 
 Background learning is protected by:
 
 - persistent retry loop
 - exponential backoff
-- concurrency limit of 4 learning tasks
+- concurrency limit of 4 learning tasks for normal background learning
+- benchmark ingestion lock for synchronous memory-ingestion learning
 - benchmark synchronization before final questions
 
 ## Tool System
@@ -446,11 +456,13 @@ The benchmark pipeline:
 1. Loads `eval_datasets/longmemeval_s_cleaned.json`
 2. Splits haystack sessions into chunks
 3. Feeds each chunk through the agent with learning enabled
-4. Waits for background memories before final questions
+4. Learns benchmark memory-ingestion chunks synchronously before returning the ingestion ACK
 5. Asks the benchmark question with learning disabled
 6. Judges with a binary evaluator
 7. Stores `question_type` with each result row for reporting, while benchmark agent calls use the same runtime interface as normal agent calls
 8. Writes results to `reports/longmemeval_results.json`
+
+For each benchmark history chunk, the agent splits the chunk into individual user/assistant pairs. Semantic and episodic actions are staged in RAM after each pair, so the next pair sees the updated working memory. After all pairs in the chunk are processed, staged semantic and episodic actions are committed to the vector stores. Procedural learning also runs per pair and refreshes procedural context when rules change.
 
 ### Parallel Evaluation
 
@@ -665,7 +677,7 @@ Quarq is built around a few hard rules:
 - Store memories with ownership, dates, and qualifiers intact.
 - Prefer saying "missing data" over inventing an answer.
 - Treat temporal and numeric claims as evidence-bound operations.
-- Keep user-facing latency low by learning in the background.
+- Keep normal user-facing latency low by learning in the background, while keeping benchmark ingestion deterministic by learning synchronously.
 - Keep the context window clean with routing and progressive disclosure.
 - Make the memory system portable, local, and easy to inspect.
 
