@@ -10,6 +10,31 @@ The current local implementation includes the structured artifact learning pipel
 
 Local LongMemEval-S reports are checkpoints while extractor behavior is being validated. Treat checked-in report files as local progress snapshots, not final published benchmark numbers.
 
+## Contents
+
+- [Why Quarq Exists](#why-quarq-exists)
+- [What Makes It Different](#what-makes-it-different)
+- [Highlights](#highlights)
+- [Architecture](#architecture)
+- [Memory System](#memory-system)
+- [Structured Artifact Learning](#structured-artifact-learning)
+- [Local Storage Layout](#local-storage-layout)
+- [Retrieval Pipeline](#retrieval-pipeline)
+- [Temporal Reasoning](#temporal-reasoning)
+- [Quantitative Reasoning](#quantitative-reasoning)
+- [Self-Correcting Retrieval](#self-correcting-retrieval)
+- [Learning Pipeline](#learning-pipeline)
+- [Tool System](#tool-system)
+- [Benchmarks](#benchmarks)
+- [Current Local Metrics](#current-local-metrics)
+- [Requirements](#requirements)
+- [Quick Start](#quick-start)
+- [Environment Variables](#environment-variables)
+- [Repository Map](#repository-map)
+- [Design Principles](#design-principles)
+- [Status](#status)
+- [License](#license)
+
 ## Why Quarq Exists
 
 Most agents can chat. Fewer can remember. Almost none can remember carefully.
@@ -499,6 +524,8 @@ Current local report files:
 reports/longmemeval_results.json
 reports/longmemeval_results.worker*.json
 ```
+
+### Current Local Metrics
 
 Current local LongMemEval-S metrics, computed from `reports/longmemeval_results.json` and joined with `eval_datasets/longmemeval_s_cleaned.json` by `question_id`:
 
