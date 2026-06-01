@@ -6,7 +6,9 @@ Quarq Agent is a memory-first AI agent built by QuarqLabs for long-context perso
 
 It is designed as an open, inspectable alternative to memory agents such as Hermes or OpenClaw, with a stronger emphasis on durable local memory, strict attribution, self-correcting retrieval, and benchmark-grade long-term recall.
 
-The current local benchmark run is in progress on LongMemEval-S and is tracking in the 99.6% to 99.7% range. The latest checked report in `reports/longmemeval_results.json` shows `256` yes, `1` no, or `99.61%`, with the full 500-question run still continuing.
+The current local implementation includes the structured artifact learning pipeline in `agent.py`. Normal prose learning still runs as before, while tables, lists, artifact blocks, quotes, budgets, timelines, metrics, ratios, and other compact evidence formats are extracted into deterministic memory units.
+
+Local LongMemEval-S reports are checkpoints while extractor behavior is being validated. Treat checked-in report files as local progress snapshots, not final published benchmark numbers.
 
 ## Why Quarq Exists
 
@@ -23,6 +25,7 @@ Quarq combines:
 - dynamic recall depth
 - strict temporal grounding
 - numeric attribution and exact aggregation rules
+- structured artifact extraction for table rows, lists, blocks, quotes, budgets, timelines, metrics, ratios, and other evidence-shaped outputs
 - self-correcting fallback retrieval
 - background memory consolidation
 - LangGraph orchestration
@@ -54,6 +57,8 @@ Quarq directly attacks those failure modes with retrieval decomposition, evidenc
 - Required-data fallback: the model can request a targeted second retrieval pass when evidence is missing.
 - Temporal truth protocol: separates database storage time from narrative event time.
 - Quantitative fidelity: numbers are stored and used with owner, property, item, and exactness.
+- Structured artifact learning: high-signal rows and items are learned as separate deterministic memories without removing the normal prose learning path.
+- Duplicate protection: batch writes skip exact duplicate content before embedding, then use the normal vector duplicate check so structured extraction does not flood memory with repeated rows.
 - Background learning: user responses return immediately while memory extraction runs asynchronously.
 - Progressive tool loading: tool docs are only injected when a skill is selected.
 - Benchmark mode: disables tool routing and waits for pending background learning before final evaluation.
@@ -146,6 +151,30 @@ Procedural memory stores behavioral rules:
 - content generation constraints
 
 Procedural rules are tagged and routed, so the model sees only the relevant rules for the current prompt instead of carrying every rule forever.
+
+## Structured Artifact Learning
+
+The local agent keeps the original normal-text learning path intact. Full user and assistant turns are still passed to the learning model, so ordinary narrative details, decisions, preferences, and summaries can become semantic, episodic, or procedural memories.
+
+Structured extractors run beside that path for artifact-shaped content that summarization can otherwise compress too aggressively. They create deterministic episodic units for high-signal data such as:
+
+- markdown table rows
+- explicit artifact blocks such as `::title:: == description`
+- numbered sections for objectives, parameters, methods, options, steps, recommendations, and similar headings
+- recommendation, remedy, dish, shop, restaurant, and product list items
+- ingredient and material items
+- budget, cost, allocation, and campaign plan rows
+- timeline and dated event clauses
+- implementation or "uses algorithm/tool" relationships
+- attributed quotations and exact source claims
+- metric, percentage, improvement, and score relationships
+- ratios, dilutions, and mixture instructions
+- music sections, chord/note style rows, and chess move notation
+- counted entity headings such as encounter counts, party sizes, item totals, or named grouped entities
+
+The extractor layer is intentionally capped and high-signal. It is not meant to memorize every sentence. Its job is to preserve compact data-bearing rows and items that future recall questions often target verbatim.
+
+Extracted units are injected into the learning prompt as `STRUCTURED ARTIFACT UNITS` and appended as episodic `ADD` actions when the learning model omits them. They still pass through the normal local `execute_actions` path, including exact duplicate blocking, batch embedding, and vector duplicate checks.
 
 ## Local Storage Layout
 
@@ -290,6 +319,7 @@ The learning model extracts:
 - semantic memories
 - episodic memories
 - procedural rules
+- structured artifact units from high-signal tables, lists, blocks, and row-like content
 
 It can issue:
 
@@ -312,6 +342,8 @@ Important learning behaviors:
 - avoids duplicate memories across semantic and episodic layers
 - prefers exact values over approximate or bounded restatements
 - updates existing records instead of creating conflicting duplicates
+- keeps normal prose learning active even when structured extractors also find tables, lists, blocks, or other artifact units
+- uses exact duplicate blocking and capped deterministic extraction to keep structured memories controlled
 
 Background learning is protected by:
 
@@ -389,14 +421,14 @@ The benchmark pipeline:
 4. Waits for background memories before final questions
 5. Asks the benchmark question with learning disabled
 6. Judges with a binary evaluator
-7. Writes results to `reports/longmemeval_results.json`
+7. Passes `question_type` into benchmark mode, stores it with each result row, and writes results to `reports/longmemeval_results.json`
 
 ### Parallel Evaluation
 
 For faster local benchmark runs, Quarq also includes a process-based parallel evaluator:
 
 ```bash
-EVAL_WORKERS=2 python run_dataset_evals_parallel.py
+EVAL_WORKERS=5 python run_dataset_evals_parallel.py
 ```
 
 The parallel runner is designed for long benchmark runs where you do not want to lose completed progress. It first loads all completed question IDs from:
@@ -414,6 +446,7 @@ Each worker receives its own `AGENT_ID`:
 <AGENT_ID>_eval_worker_0
 <AGENT_ID>_eval_worker_1
 <AGENT_ID>_eval_worker_2
+...
 ```
 
 That means each worker gets an isolated FAISS memory folder under `local_memory/`, so multiple questions can be learned and evaluated at the same time without memory collision.
@@ -432,7 +465,27 @@ When all workers finish, the runner merges worker outputs back into:
 reports/longmemeval_results.json
 ```
 
-Choose `EVAL_WORKERS` based on the machine and API limits. A good starting point is the number of performance cores you are comfortable dedicating to the run, then increase until OpenAI rate limits or local CPU pressure become the bottleneck. On an 8-core machine, `2` to `4` workers is usually a practical starting range; on larger machines, scale upward gradually.
+The default is `5` workers. Choose `EVAL_WORKERS` based on the machine and API limits, then increase until OpenAI rate limits or local CPU pressure become the bottleneck.
+
+### Prompt Regression Samples
+
+For faster iteration on prompt and retrieval changes, use the sample runner:
+
+```bash
+python run_dataset_evals_sample.py
+```
+
+It reuses the parallel evaluator, selects a deterministic sample, writes a manifest of sampled questions, keeps per-worker checkpoints, and merges results into a sample-specific report. Useful environment variables:
+
+```text
+EVAL_SAMPLE_NAME=prompt_regression
+EVAL_SAMPLE_SIZE=60
+EVAL_SAMPLE_SOURCE_LIMIT=500
+EVAL_SAMPLE_SEED=test6
+EVAL_SAMPLE_QUESTION_IDS=<comma-separated ids>
+EVAL_SAMPLE_FRESH=1
+EVAL_WORKERS=20
+```
 
 To monitor live results across both the main and worker result files:
 
@@ -440,15 +493,26 @@ To monitor live results across both the main and worker result files:
 python monitor_results.py
 ```
 
-Current checked local report:
+Current local report files:
 
 ```text
-LongMemEval-S checkpoint: 240 yes / 1 no
-Accuracy: 99.59%
-Status: 500-question run in progress
+reports/longmemeval_results.json
+reports/longmemeval_results.worker*.json
 ```
 
-These results are local and in progress until independently reproduced from a clean checkout.
+Current local LongMemEval-S metrics, computed from `reports/longmemeval_results.json` and joined with `eval_datasets/longmemeval_s_cleaned.json` by `question_id`:
+
+| Question type | Correct | Incorrect | Total | Accuracy |
+| --- | ---: | ---: | ---: | ---: |
+| Overall | 491 | 9 | 500 | 98.20% |
+| knowledge-update | 77 | 1 | 78 | 98.72% |
+| multi-session | 129 | 4 | 133 | 96.99% |
+| single-session-assistant | 56 | 0 | 56 | 100.00% |
+| single-session-preference | 30 | 0 | 30 | 100.00% |
+| single-session-user | 70 | 0 | 70 | 100.00% |
+| temporal-reasoning | 129 | 4 | 133 | 96.99% |
+
+These files are local checkpoints. Re-run from a clean checkout before treating any number as a reproducible public benchmark.
 
 ## Requirements
 
