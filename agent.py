@@ -3013,18 +3013,7 @@ async def learn_vector_memory(
         else ai_response
     )
 
-    artifact_context = re.sub(r"\s+", " ", source_user_prompt).strip()
-    artifact_context = artifact_context[:220] if artifact_context else "the generated artifact"
-
-    artifact_source_text = f"{source_user_prompt}\n\n{source_ai_response}".strip()
-
     structured_artifact_memories = []
-
-    structured_artifact_section = (
-        "\n".join(f"- {m}" for m in structured_artifact_memories)
-        if structured_artifact_memories
-        else "None"
-    )
 
     prompt_current_context = format_memory_context_for_prompt(
         current_context, keep_ids=True
@@ -3841,7 +3830,7 @@ async def update_memories_node(state: AgentState):
     # Unpack the tuples
     sem_content, sem_tokens = results[0]
     epi_content, epi_tokens = results[1]
-    broad_epi_content, broad_epi_tokens = "", {"input": 0, "output": 0}
+    broad_epi_content = ""
     pro_content, pro_tokens = results[2]
 
     # Unpack and Sum
@@ -3915,7 +3904,7 @@ async def background_memory_update(
     # Unpack the tuples
     sem_content, sem_tokens = results[0]
     epi_content, epi_tokens = results[1]
-    broad_epi_content, broad_epi_tokens = "", {"input": 0, "output": 0}
+    broad_epi_content = ""
     pro_content, pro_tokens = results[2]
 
     total_in = sum(r[1]["input"] for r in results)
