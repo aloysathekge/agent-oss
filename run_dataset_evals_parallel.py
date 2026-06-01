@@ -33,7 +33,7 @@ DATASET_URL = (
 
 MASTER_RESULTS_PATH = os.path.join(REPORTS_DIR, "longmemeval_results.json")
 
-NUM_WORKERS = int(os.getenv("EVAL_WORKERS", "5"))
+NUM_WORKERS = int(os.getenv("EVAL_WORKERS", "1"))
 WORKER_ID = os.getenv("EVAL_WORKER_ID")
 SHARD_PATH = os.getenv("EVAL_SHARD_PATH")
 BASE_AGENT_ID = os.getenv("AGENT_ID") or "local_agent"

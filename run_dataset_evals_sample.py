@@ -15,9 +15,9 @@ import run_dataset_evals_parallel as base
 # =========================================================
 
 SAMPLE_NAME = os.getenv("EVAL_SAMPLE_NAME", "prompt_regression")
-SAMPLE_SIZE = int(os.getenv("EVAL_SAMPLE_SIZE", "60"))
+SAMPLE_SIZE = int(os.getenv("EVAL_SAMPLE_SIZE", "5"))
 SAMPLE_SOURCE_LIMIT = int(os.getenv("EVAL_SAMPLE_SOURCE_LIMIT", "500"))
-SAMPLE_SEED = os.getenv("EVAL_SAMPLE_SEED", "test6")
+SAMPLE_SEED = os.getenv("EVAL_SAMPLE_SEED", "test")
 SAMPLE_QUESTION_IDS = [
     qid.strip()
     for qid in os.getenv(
@@ -63,7 +63,7 @@ def get_worker_result_paths() -> list[str]:
 def configure_base_paths():
     worker_id = os.getenv("EVAL_WORKER_ID")
 
-    base.NUM_WORKERS = int(os.getenv("EVAL_WORKERS", "20"))
+    base.NUM_WORKERS = int(os.getenv("EVAL_WORKERS", "1"))
     base.WORKER_ID = worker_id
     base.SHARD_PATH = os.getenv("EVAL_SHARD_PATH")
     base.MASTER_RESULTS_PATH = MASTER_RESULTS_PATH

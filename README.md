@@ -449,7 +449,8 @@ The benchmark pipeline:
 4. Waits for background memories before final questions
 5. Asks the benchmark question with learning disabled
 6. Judges with a binary evaluator
-7. Passes `question_type` into benchmark mode, stores it with each result row, and writes results to `reports/longmemeval_results.json`
+7. Stores `question_type` with each result row for reporting, while benchmark agent calls use the same runtime interface as normal agent calls
+8. Writes results to `reports/longmemeval_results.json`
 
 ### Parallel Evaluation
 
