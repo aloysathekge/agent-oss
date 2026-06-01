@@ -539,7 +539,7 @@ Current local LongMemEval-S metrics, computed from `reports/longmemeval_results.
 | single-session-user | 70 | 0 | 70 | 100.00% |
 | temporal-reasoning | 129 | 4 | 133 | 96.99% |
 
-These files are local checkpoints. Re-run from a clean checkout before treating any number as a reproducible public benchmark.
+These metrics represent the current LongMemEval-S progress while Quarq Agent is actively being improved. Some answers may change as failing or uncertain questions are rerun and fixes are added.
 
 ## Requirements
 
