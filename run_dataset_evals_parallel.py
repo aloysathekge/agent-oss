@@ -265,45 +265,121 @@ def chunk_history(
 
 async def binary_judge(question: str, expected_answer: str, agent_answer: str) -> str:
     judge_prompt = f"""You are an expert evaluator grading an AI's memory recall and reasoning.
-    
-Evaluate if the AGENT accurately answered the QUESTION based on the EXPECTED answer.
 
-QUESTION: {question}
-EXPECTED: {expected_answer}
-AGENT: {agent_answer}
+Evaluate whether the AGENT answer is semantically equivalent to the EXPECTED answer.
 
+QUESTION:
+{question}
+
+EXPECTED ANSWER:
+{expected_answer}
+
+AGENT ANSWER:
+{agent_answer}
 
 EVALUATION RULES:
-1. If the AGENT answer explicitly contains or clearly means the EXPECTED answer, you MUST output 'YES'.
-2. DO NOT penalize the agent for speaking in full sentences, being conversational, directly addressing the user, or ignoring 3rd-person formatting requests. As long as the underlying answer matches the intent, output 'YES'.
-3. DO NOT penalize the agent if it provides the EXPECTED answer but ALSO adds additional accurate context or extra personalized suggestions. Additional helpful advice is a positive trait, not a failure.
-4. INTENT & ACTION MATCHING (CRITICAL): Sometimes the EXPECTED answer describes how the agent should behave rather than a single literal final answer. If the AGENT actually provides the requested kind of answer and satisfies the same core intent, you MUST output 'YES'.
-5. ADVICE / RECOMMENDATION ACCEPTANCE (CRITICAL): For advice, tips, suggestions, ideas, or recommendations, output 'YES' if the AGENT provides useful, practical advice grounded in relevant user memories, preferences, experiences, tools, setup, or constraints described by the EXPECTED answer. If the QUESTION asks for a suggestion, recommendation, advice, idea, or what the user should do, accept an AGENT answer that directly gives the suitable recommendation or suggestions; do NOT require it to phrase the answer as "the user would prefer..." or as a preference profile. Do NOT require the AGENT to explicitly phrase the response as a preference profile unless the QUESTION itself asks what the user would prefer, how answers should be tailored, or asks for a preference/profile description. Do NOT require every contextual detail from the EXPECTED answer to be repeated verbatim; semantically equivalent, broader, or action-oriented wording is acceptable when it addresses the same concern. Output 'NO' only when the advice is generic with no relevant personalization, contradicts a hard constraint, recommends something the EXPECTED answer says to avoid, or misses the main advice target.
-6. IMPLICIT SUCCESS (CRITICAL): If the EXPECTED answer contains a negative constraint or states that the user would dislike or avoid a category, and the AGENT successfully avoids that category while providing valid personalized alternatives, you MUST output 'YES'. The agent does not need to explicitly state the negative constraint as long as its final answer obeys the constraint.
-7. INCIDENTAL MECHANISM TOLERANCE (CRITICAL): For advice tasks with a negative constraint, judge the recommended activity itself, not incidental setup, optional tools, or delivery mechanisms. Output 'YES' when the main recommendations satisfy the user's goal and constraints. Output 'NO' only when the avoided behavior is recommended as a main activity, is unavoidable for the recommendation, or directly undermines the user's stated concern.
-8. CONDITIONAL SUCCESS & MATH RANGES (CRITICAL): If the AGENT's answer contains the correct factual information from the EXPECTED answer, but frames it conditionally because of vague references in its database, or if the agent provides a mathematically accurate range or conditional span because a specific variable is missing, you MUST output 'YES'. Deductive, conditional, or range-based reasoning that includes the expected underlying fact is a success.
-9. SPECIFICITY OVERRIDE: Sometimes the EXPECTED answer contains generic categories or illustrative details. If the AGENT's answer replaces those with specific, personalized details from the context that align with the core intent, you MUST output 'YES'. Do not penalize the agent for being more personalized than the expected answer.
-10. FORMATTING & TABLE EXCLUSION (CRITICAL): The agent must often follow strict formatting rules (e.g., Markdown tables, bold headers) that the EXPECTED answer does not use. You are FORBIDDEN from penalizing the agent for using tables, bullet points, or structured headers. If the factual conclusion inside the table matches the EXPECTED answer, you MUST output 'YES'.
-11. PARTIAL DATA & MISSING VARIABLES (CRITICAL): If the EXPECTED answer states that a calculation cannot be completed because a specific variable is missing, and the AGENT successfully identifies that the exact same variable is missing or zero, you MUST output 'YES'. Do not penalize the agent if it proceeds to calculate a partial total using the available numbers; recognizing the missing variable is the core success criterion.
-12. NEGATIVE ABSENCE EQUIVALENCE (CRITICAL): For yes/no memory questions, if the EXPECTED answer is negative (e.g., says "No", "did not", "was not", "without", or "not with") and the AGENT states the same absence using wording such as "no mention", "no evidence", "not mentioned", "does not say", "not specified", or "no indication", you MUST output 'YES' unless the AGENT also asserts a contradictory positive fact.
-13. Only output 'NO' if the core factual information is entirely missing, if the agent violates a core constraint, or if the agent explicitly says it doesn't know without providing any correct conditional deduction.
-14.UNIT GRANULARITY ACCEPTANCE:
-If the question asks for a duration in a coarse unit such as weeks, months, or years, and the expected answer gives only that coarse unit, accept an agent answer that gives the same coarse-unit value plus a smaller-unit remainder, as long as the coarse-unit value matches and the answer does not contradict the expected result.
-15. NUMERIC SCALAR WORDING ACCEPTANCE:
-If the EXPECTED answer is a single numeric scalar and the question is direct factual recall, accept an AGENT answer that states the same numeric scalar with approximate wording such as "about", "around", "close to", or "nearly".
-The approximation word must modify the EXPECTED numeric value itself. Do not accept a different numeric value merely because it is close, rounded, or approximately similar.
-If the AGENT gives a different numeric scalar for the same target and does not state the EXPECTED scalar, output 'NO'.
-This rule does not apply to arithmetic, prices, payments, date gaps, exact-precision questions, or multi-number answers.
-16. ZERO / UNRECORDED COMPONENT ACCEPTANCE:
-If the EXPECTED answer is a numeric total and the AGENT states the expected numeric value for one component while correctly saying another requested component is only planned, unrecorded, unspecified, or not evidenced, accept it as YES as long as the AGENT does not add a conflicting numeric amount for that component.
-Output ONLY 'YES' or 'NO'."""
+
+1. MEMORY FACT PRIORITY (CRITICAL):
+The primary goal is to evaluate whether the AGENT correctly recalled and used the memory facts contained in the EXPECTED answer.
+
+For memory questions involving names, dates, numbers, preferences, relationships, schedules, events, locations, purchases, plans, constraints, or historical facts:
+- The AGENT must correctly recover the same underlying fact.
+- Helpful advice, alternative suggestions, personalization, or generally reasonable responses do NOT count unless the underlying memory fact is correctly recalled.
+- Missing the key memory fact is NO even if the answer is useful.
+
+2. SEMANTIC EQUIVALENCE:
+Output YES if the AGENT answer clearly expresses the same meaning as the EXPECTED answer, even if wording, phrasing, sentence structure, or level of detail differs.
+
+3. FORMATTING TOLERANCE:
+Do NOT penalize for:
+- Full sentences
+- Conversational tone
+- First-person or third-person wording
+- Bullet points
+- Tables
+- Markdown formatting
+- Additional non-conflicting details
+
+4. ADDITIONAL INFORMATION:
+If the AGENT includes the correct answer and adds extra information that does not contradict the EXPECTED answer, output YES.
+
+5. CONTRADICTION RULE (CRITICAL):
+If the AGENT states a fact that directly contradicts the EXPECTED answer, output NO even if some surrounding information is correct.
+
+A contradiction always overrides partial matches.
+
+6. ABSTENTION RULE:
+If the EXPECTED answer indicates that the information:
+- was not mentioned,
+- does not exist,
+- is unavailable,
+- cannot be determined,
+
+then semantically equivalent responses such as:
+- "not mentioned"
+- "no evidence"
+- "not specified"
+- "I couldn't find that information"
+- "there is no indication"
+
+should be judged YES.
+
+7. CONDITIONAL WORDING:
+Conditional wording is acceptable only if the AGENT still clearly states the expected underlying fact.
+
+Accept:
+- "I believe it was June 5."
+- "It appears the answer is June 5."
+
+Reject:
+- "Maybe June 5 or June 6."
+- "Sometime in June."
+
+8. NUMERIC ACCEPTANCE:
+If the EXPECTED answer contains a numeric value:
+- Accept equivalent expressions of the same value.
+- Accept approximate wording ("about", "around", "roughly") ONLY when the same underlying number is stated.
+- Do not accept different numbers.
+
+9. DURATION GRANULARITY:
+If the EXPECTED answer gives a duration in weeks, months, or years, accept an answer that gives the same duration plus smaller-unit detail, provided it does not contradict the expected value.
+
+10. MISSING VARIABLE CASES:
+If the EXPECTED answer states that a calculation cannot be completed because a specific value is missing, output YES if the AGENT correctly identifies the same missing value.
+
+11. HALLUCINATION RULE:
+Output NO if the AGENT invents unsupported facts that change the meaning of the EXPECTED answer.
+
+12. FINAL DECISION:
+Output YES only if the key memory fact(s) from the EXPECTED answer are correctly recalled and not contradicted.
+
+Output NO if:
+- the key memory fact is missing,
+- the key memory fact is incorrect,
+- the AGENT contradicts the EXPECTED answer,
+- the AGENT gives a generic answer instead of recalling memory,
+- the AGENT hallucinates unsupported facts.
+
+Respond with exactly one token:
+YES
+or
+NO
+"""
 
     response = await judge_llm.ainvoke([HumanMessage(content=judge_prompt)])
+
     verdict = str(response.content).strip().upper()
-    
-    if "YES" in verdict:
+
+    if verdict == "YES":
         return "YES"
-    return "NO"
+
+    if verdict == "NO":
+        return "NO"
+
+    import re
+    match = re.search(r"\b(YES|NO)\b", verdict)
+
+    return match.group(1) if match else "NO"
 
 async def feed_memory_chunks(
     chunks: List[Dict],
