@@ -242,6 +242,30 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
     return out
 
 
+def format_current_time(value=None) -> str:
+    """Render current-date anchors as 'Month D, YYYY, HH:MM' when parseable."""
+    if isinstance(value, datetime):
+        return f"{value.strftime('%B')} {value.day}, {value.year}, {value.strftime('%H:%M')}"
+
+    text = str(value or "").strip()
+    if not text:
+        return format_current_time(datetime.now())
+
+    for fmt in (
+        "%Y/%m/%d (%a) %H:%M",
+        "%Y/%m/%d %H:%M",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%A, %B %d, %Y at %I:%M %p",
+    ):
+        try:
+            return format_current_time(datetime.strptime(text, fmt))
+        except ValueError:
+            pass
+
+    return text
+
+
 MEMORY_INGESTION_PREFIX = "Review and remember this conversation history:"
 MEMORY_INGESTION_ACK = "Yes, I have reviewed and remembered everything."
 
@@ -1784,6 +1808,7 @@ async def retrieve_memories_node(state: AgentState):
         current_time_str = state["current_date"]
     else:
         current_time_str = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+    hyde_time_str = format_current_time(current_time_str)
 
     preference_hyde_hint = """
     If the user's prompt asks for a preference, recommendation, advice, suggestion, or choice, generate queries and keywords to retrieve the user's likes, dislikes, preferences, constraints, avoidances, and related preference signals.
@@ -1833,7 +1858,7 @@ async def retrieve_memories_node(state: AgentState):
          * Query 3: Search for the specific detail or action (The food, the bedtime, the companion).
        - If the prompt asks for an aggregation over a state change or maintenance action, Query 1 and Query 3 must describe the underlying transition, not only the literal verb in the prompt. Include the source/prior object or state, the resulting object or state, and the concrete target category when these can be inferred from the prompt. This is a conceptual decomposition rule, not a keyword-expansion rule.
        - If the user asks for advice, recommendations, suggestions, or ideas (e.g., "Can you suggest...", "Any advice?", "Can you recommend..."), Query 3 MUST ALSO explicitly search for the user's past struggles, dislikes, negative constraints, or explicit non-interests related to the topic to ensure the agent knows what to avoid (e.g., "User's dislikes, struggles, avoids, not interested in, strictly prefers").
-    4. CONDITIONAL TIME RESOLUTION (CRITICAL): The current system date is {current_time_str}. 
+    4. CONDITIONAL TIME RESOLUTION (CRITICAL): The current system date is {hyde_time_str}. 
        - ONLY append dates if the user's intent is temporally bound (e.g., specific past events, action times, time comparisons, durations).
        - If the user's prompt contains relative time (e.g., "last weekend", "yesterday", "recently"), you MUST explicitly calculate the exact target date or year (Month and Day/Year) and put THAT DATE in Query 1 and Query 2. 
        - NEVER use the actual words "last weekend" or "yesterday" in your generated queries. Replace them completely with the calculated absolute date (e.g., "May 9").
@@ -2235,6 +2260,7 @@ async def generate_response_node(state: AgentState):
         current_time_str = state["current_date"]
     else:
         current_time_str = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+    prompt_time_str = format_current_time(current_time_str)
 
 
     identity_instruction = f"""
@@ -2243,7 +2269,7 @@ async def generate_response_node(state: AgentState):
     Personality/Tone: {personality}
     Core Objectives: You are specifically optimized for: {use_cases}.
     {f'Custom User Directives: {custom_prompt}' if custom_prompt else ''}
-    CURRENT SYSTEM DATE/TIME: {current_time_str} 
+    CURRENT SYSTEM DATE/TIME: {prompt_time_str} 
     
 
     Your responses must strictly align with this identity and tone.
@@ -2373,6 +2399,8 @@ async def generate_response_node(state: AgentState):
 
     """)
 
+    question_time_str = prompt_time_str
+
     final_user_prompt = f"""
     Deduce the response for the user question using only the retrieved context below.
 
@@ -2400,6 +2428,7 @@ async def generate_response_node(state: AgentState):
     - Any entity written under rejected near-misses is banned from calculation and from being stated as the direct answer.
     - Use narrative dates inside memory content as event/state dates. Use ordinal memory labels only as storage-recency hints, not as historical event dates.
     - For event ordering, separate event dates from report dates. Phrases such as "reported having", "mentioned having", "recalled", "recently", or "as of" often mark when the event was discussed, not when it happened. When several memories describe the same real-world event, use the earliest exact completed-event date directly tied to that event; do not move the event later because it was re-mentioned later.
+    - Preserve the memory's action/verb semantics exactly. Do not convert, promote, or complete one stated action into another stronger or different action unless the memory explicitly states that stronger action happened.
     - For state updates, a supporting date/window memory may be used if it is clearly part of the same target update chain, even if it does not repeat the target noun. Example: "store old notebooks in a shelf box" plus "organize the shelf on Jan 5" can supply Jan 5 as the effective window for the shelf-box update. Do not use unrelated same-category plans this way.
     - For current-state questions, the first sentence of agent_response must answer the current state at the anchor. Put previous/historical states after that, not before.
     - For ordered sequences, games, logs, score sheets, or notation, exact recorded sequence items are valid evidence. If the question asks what came after an anchor and an ACCEPT row explicitly contains that anchor followed by the next item, answer with that next item.
@@ -2507,13 +2536,13 @@ async def generate_response_node(state: AgentState):
     {assistant_recall_answer_hint}
     {benchmark_span_aggregation_hint}
 
-    User question at this time ({current_time_str}):
+    User question at this time ({question_time_str}):
     {state["user_prompt"]}
     """
 
     print("user prompt:")
 
-    print(f""" User question at this time ({current_time_str}):
+    print(f"""User question at this time ({question_time_str}):
     {state["user_prompt"]} """)
 
     if state.get("skill_markdown"):
@@ -2754,6 +2783,7 @@ Grounding rules:
 - Any entity written under rejected near-misses is banned from calculation and from being stated as the direct answer.
 - Use narrative dates inside memory content as event/state dates. Use ordinal memory labels only as storage-recency hints, not as historical event dates.
 - For event ordering, separate event dates from report dates. Phrases such as "reported having", "mentioned having", "recalled", "recently", or "as of" often mark when the event was discussed, not when it happened. When several memories describe the same real-world event, use the earliest exact completed-event date directly tied to that event; do not move the event later because it was re-mentioned later.
+- Preserve the memory's action/verb semantics exactly. Do not convert, promote, or complete one stated action into another stronger or different action unless the memory explicitly states that stronger action happened.
 - For state updates, a supporting date/window memory may be used if it is clearly part of the same target update chain, even if it does not repeat the target noun. Example: "store old notebooks in a shelf box" plus "organize the shelf on Jan 5" can supply Jan 5 as the effective window for the shelf-box update. Do not use unrelated same-category plans this way.
 - For current-state questions, the first sentence of agent_response must answer the current state at the anchor. Put previous/historical states after that, not before.
 - For ordered sequences, games, logs, score sheets, or notation, exact recorded sequence items are valid evidence. If the question asks what came after an anchor and an ACCEPT row explicitly contains that anchor followed by the next item, answer with that next item.
@@ -2863,7 +2893,7 @@ Within each memory block, memories are listed newest-to-oldest by storage recenc
 {assistant_recall_answer_hint}
 {benchmark_span_aggregation_hint}
 
-User question at this time ({current_time_str}):
+User question at this time ({question_time_str}):
 {state["user_prompt"]}
 """
         new_messages = [SystemMessage(content=system_instruction)] + list(state["chat_history"]) + [HumanMessage(content=new_user_prompt)]
@@ -3037,6 +3067,7 @@ async def learn_vector_memory(
     else:
         current_year = datetime.now().year 
         current_time = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+    prompt_current_time = format_current_time(current_time)
 
     ingestion_turn = is_memory_ingestion_prompt(user_prompt)
     source_user_prompt = unwrap_memory_ingestion_prompt(user_prompt)
@@ -3080,7 +3111,7 @@ async def learn_vector_memory(
     {"Conversation history to remember" if ingestion_turn else "User"}: {source_user_prompt}
     This is AI response to user message: {source_ai_response if source_ai_response else "(fixed ingestion acknowledgement omitted)"}
 
-    CRITICAL TIME RESOLUTION: The current system time is {current_time}. 
+    CRITICAL TIME RESOLUTION: The current system time is {prompt_current_time}. 
     If the user uses relative time words (e.g., "yesterday", "last month", "tomorrow"), you MUST convert them into absolute dates within the "content" string you generate.
     If the user mentions an event but doesn't specify the year (e.g., "in August", "for my birthday"), you MUST append the current year ({current_year}) to the date. Example: "in August" -> "in August {current_year}". 
     Example: If user says "I started a diet yesterday", store "User started a diet on [Calculated Date]."
@@ -3338,6 +3369,7 @@ async def learn_broad_episodic_memory(
     else:
         current_year = datetime.now().year
         current_time = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+    prompt_current_time = format_current_time(current_time)
 
     ingestion_turn = is_memory_ingestion_prompt(user_prompt)
     source_user_prompt = unwrap_memory_ingestion_prompt(user_prompt)
@@ -3352,7 +3384,7 @@ async def learn_broad_episodic_memory(
     artifact_source_text = f"{source_user_prompt}\n\n{source_ai_response}".strip()
     structured_units = extract_structured_artifact_memories(
         artifact_source_text,
-        current_time,
+        prompt_current_time,
         artifact_context,
     )
     structured_section = (
@@ -3374,7 +3406,7 @@ async def learn_broad_episodic_memory(
     Atomic memory extraction has a different job: it compresses the interaction into small facts.
     Your job is the complementary job: preserve a small number of broader, high-fidelity recall capsules so future questions can recover exact answer-bearing context.
 
-    CURRENT SYSTEM TIME: {current_time}
+    CURRENT SYSTEM TIME: {prompt_current_time}
     CURRENT YEAR: {current_year}
 
     CURRENT EPISODIC MEMORIES (With Database IDs):
