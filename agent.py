@@ -2118,14 +2118,14 @@ async def retrieve_memories_node(state: AgentState):
     end_time = time.time()  # END TIMER
 
     print("\n--- Memory Retrieval Complete ---")
-    if semantic_result:
-        print(f"Semantic Found:\n{semantic_result}")
-    if episodic_result:
-        print(f"Episodic Found:\n{episodic_result}")
-    if procedural_result:
-        print(f"Procedural Found:\n{procedural_result}")
-    else:
-        print("Procedural Found: None (No relevant tags found)")
+    # if semantic_result:
+    #     print(f"Semantic Found:\n{semantic_result}")
+    # if episodic_result:
+    #     print(f"Episodic Found:\n{episodic_result}")
+    # if procedural_result:
+    #     print(f"Procedural Found:\n{procedural_result}")
+    # else:
+    #     print("Procedural Found: None (No relevant tags found)")
 
     print(
         f"⏱️ [Metrics] Time: {end_time - start_time:.2f}s | Tokens: In({in_tokens}) Out({out_tokens})"
@@ -2356,6 +2356,23 @@ async def generate_response_node(state: AgentState):
         state.get("procedural_context", ""), keep_ids=False
     )
 
+    print(f"""
+
+    Retrieved context:
+    Within each memory block, memories are listed newest-to-oldest by storage recency.
+    [Memory 1 - newest] is the newest retrieved memory in that block; the line marked oldest is the oldest.
+
+    [SEMANTIC - User Facts]
+    {generation_semantic_context}
+
+    [EPISODIC - Past Events]
+    {generation_episodic_context}
+
+    [PROCEDURAL - Strict Rules]
+    {generation_procedural_context}
+
+    """)
+
     final_user_prompt = f"""
     Deduce the response for the user question using only the retrieved context below.
 
@@ -2377,13 +2394,18 @@ async def generate_response_node(state: AgentState):
     - Bind the exact requested target before selecting evidence: answer type, requested count/list size, exact noun/category, qualifiers, relation/action, and time/scope.
     - Accept only entities whose actual name or type matches the requested target noun/category. Reject sibling or nearby categories.
     - Do not broaden or substitute categories unless the user asks for suggestions, recommendations, opinions, ideas, examples, or related items. For example: museum != gallery, fruit != vegetable, chocolate bar type != candy, hotel != restaurant, shirt != all clothing.
+    - For category-specific list/order/count questions, a candidate must either contain the requested category in its name/type or be explicitly classified as that category by the memory. Do not infer category membership from cultural, travel, tour, venue, historical, educational, or recommendation context alone.
+    - For exact-category questions, if a candidate's own name or stated type contains a sibling category noun that is not the requested category, reject it even if the activity/relation resembles the requested category. If the requested category is one noun, a different venue/type noun is not accepted unless the memory explicitly states it belongs to the requested category.
+    - If the user asks for exactly N targets, first filter and deduplicate by exact category, completed relation/action, and requested scope. If exactly N valid targets remain, answer with all N valid targets and do not replace any valid target with a near-miss. If more or fewer than N valid targets remain after strict filtering, explain the supported ledger or request more data according to the REQUIRED_DATA rule; never choose the first N from a mixed list that still contains rejected near-misses.
     - Any entity written under rejected near-misses is banned from calculation and from being stated as the direct answer.
     - Use narrative dates inside memory content as event/state dates. Use ordinal memory labels only as storage-recency hints, not as historical event dates.
+    - For event ordering, separate event dates from report dates. Phrases such as "reported having", "mentioned having", "recalled", "recently", or "as of" often mark when the event was discussed, not when it happened. When several memories describe the same real-world event, use the earliest exact completed-event date directly tied to that event; do not move the event later because it was re-mentioned later.
     - For state updates, a supporting date/window memory may be used if it is clearly part of the same target update chain, even if it does not repeat the target noun. Example: "store old notebooks in a shelf box" plus "organize the shelf on Jan 5" can supply Jan 5 as the effective window for the shelf-box update. Do not use unrelated same-category plans this way.
     - For current-state questions, the first sentence of agent_response must answer the current state at the anchor. Put previous/historical states after that, not before.
     - For ordered sequences, games, logs, score sheets, or notation, exact recorded sequence items are valid evidence. If the question asks what came after an anchor and an ACCEPT row explicitly contains that anchor followed by the next item, answer with that next item.
     - For monetary, count, duration, or total aggregation questions, build a complete ledger of every ACCEPT row with its date, target, and numeric value before calculating. Do not answer from only the most recent or most salient row. Sum/count every unique ACCEPT row in scope, including older rows within the requested window.
     - For count/times aggregation questions, deduplicate repeated memories that describe the same real-world event before counting. Count unique completed events, not every retrieved mention or summary of the same event.
+    - For list/order/count questions, if a later memory repeats a completed event using report wording and an earlier memory gives a more direct completed-event date for the same target/action, merge them as one event under the direct event date.
     - For count/times aggregation questions, a completed attempt still counts even if the result was poor, failed, disappointing, or later retried, unless the user explicitly asks only for successful outcomes.
     - For state-change aggregation questions, accept evidence that preserves the same real-world transition even when it is expressed through old/source state plus new/result state rather than the exact wording in the question. Keep each changed target distinct; do not count generic advice, future plans, or unrelated ownership as a completed transition.
     - For current possession/count questions about durable objects, treat earlier owned/acquired/used/setup objects as still current unless later evidence says they were sold, discarded, returned, replaced, transferred away, or otherwise no longer owned/kept by the user.
@@ -2442,6 +2464,7 @@ async def generate_response_node(state: AgentState):
        Use only ACCEPT rows. For ordering/counting, sort/count only unique ACCEPT rows by exact event date and requested scope after deduplicating repeated mentions of the same event. For knowledge updates, preferences, opinions, locations, possessions, projects, jobs, relationships, and other stateful questions, resolve the latest supported state at the anchor and include important historical/intended-state context after the direct answer when needed to avoid false certainty.
     7. Final check:
        Verify every factual claim comes from ACCEPT evidence, all conflicts were analyzed, state transitions were considered, no rejected evidence appears as the answer, current-state answers begin with the anchor-time current interpretation, uncertainty is explicitly stated when present, and REQUIRED_DATA is used only when evidence is genuinely insufficient.
+       The final answer must be exactly the ACCEPT rows after strict filtering. Never include a REJECT row in target_seen, timeline, calculation, or final answer. If target_seen contains a rejected item, or if the timeline/calculation contains more or fewer accepted items than the final answer, redo the filtering before answering.
     8. Conclusion: state the answer you will put in agent_response or state that REQUIRED_DATA is needed.
 
     Neutral target format example:
@@ -2723,13 +2746,18 @@ Grounding rules:
 - Bind the exact requested target before selecting evidence: answer type, requested count/list size, exact noun/category, qualifiers, relation/action, and time/scope.
 - Accept only entities whose actual name or type matches the requested target noun/category. Reject sibling or nearby categories.
 - Do not broaden or substitute categories unless the user asks for suggestions, recommendations, opinions, ideas, examples, or related items. For example: museum != gallery, fruit != vegetable, chocolate bar type != candy, hotel != restaurant, shirt != all clothing.
+- For category-specific list/order/count questions, a candidate must either contain the requested category in its name/type or be explicitly classified as that category by the memory. Do not infer category membership from cultural, travel, tour, venue, historical, educational, or recommendation context alone.
+- For exact-category questions, if a candidate's own name or stated type contains a sibling category noun that is not the requested category, reject it even if the activity/relation resembles the requested category. If the requested category is one noun, a different venue/type noun is not accepted unless the memory explicitly states it belongs to the requested category.
+- If the user asks for exactly N targets, first filter and deduplicate by exact category, completed relation/action, and requested scope. If exactly N valid targets remain, answer with all N valid targets and do not replace any valid target with a near-miss. If more or fewer than N valid targets remain after strict filtering, explain the supported ledger or request more data according to the REQUIRED_DATA rule; never choose the first N from a mixed list that still contains rejected near-misses.
 - Any entity written under rejected near-misses is banned from calculation and from being stated as the direct answer.
 - Use narrative dates inside memory content as event/state dates. Use ordinal memory labels only as storage-recency hints, not as historical event dates.
+- For event ordering, separate event dates from report dates. Phrases such as "reported having", "mentioned having", "recalled", "recently", or "as of" often mark when the event was discussed, not when it happened. When several memories describe the same real-world event, use the earliest exact completed-event date directly tied to that event; do not move the event later because it was re-mentioned later.
 - For state updates, a supporting date/window memory may be used if it is clearly part of the same target update chain, even if it does not repeat the target noun. Example: "store old notebooks in a shelf box" plus "organize the shelf on Jan 5" can supply Jan 5 as the effective window for the shelf-box update. Do not use unrelated same-category plans this way.
 - For current-state questions, the first sentence of agent_response must answer the current state at the anchor. Put previous/historical states after that, not before.
 - For ordered sequences, games, logs, score sheets, or notation, exact recorded sequence items are valid evidence. If the question asks what came after an anchor and an ACCEPT row explicitly contains that anchor followed by the next item, answer with that next item.
 - For monetary, count, duration, or total aggregation questions, build a complete ledger of every ACCEPT row with its date, target, and numeric value before calculating. Do not answer from only the most recent or most salient row. Sum/count every unique ACCEPT row in scope, including older rows within the requested window.
 - For count/times aggregation questions, deduplicate repeated memories that describe the same real-world event before counting. Count unique completed events, not every retrieved mention or summary of the same event.
+- For list/order/count questions, if a later memory repeats a completed event using report wording and an earlier memory gives a more direct completed-event date for the same target/action, merge them as one event under the direct event date.
 - For count/times aggregation questions, a completed attempt still counts even if the result was poor, failed, disappointing, or later retried, unless the user explicitly asks only for successful outcomes.
 - For state-change aggregation questions, accept evidence that preserves the same real-world transition even when it is expressed through old/source state plus new/result state rather than the exact wording in the question. Keep each changed target distinct; do not count generic advice, future plans, or unrelated ownership as a completed transition.
 - For current possession/count questions about durable objects, treat earlier owned/acquired/used/setup objects as still current unless later evidence says they were sold, discarded, returned, replaced, transferred away, or otherwise no longer owned/kept by the user.
@@ -2784,6 +2812,7 @@ Before the JSON response, write a <thinking> block with:
    Use only ACCEPT rows. For ordering/counting, sort/count only unique ACCEPT rows by exact event date and requested scope after deduplicating repeated mentions of the same event. For knowledge updates, preferences, opinions, locations, possessions, projects, jobs, relationships, and other stateful questions, resolve the latest supported state at the anchor and include important historical/intended-state context after the direct answer when needed to avoid false certainty.
 7. Final check:
    Verify every factual claim comes from ACCEPT evidence, all conflicts were analyzed, state transitions were considered, no rejected evidence appears as the answer, current-state answers begin with the anchor-time current interpretation, uncertainty is explicitly stated when present, and insufficiency is stated only when evidence is genuinely insufficient.
+   The final answer must be exactly the ACCEPT rows after strict filtering. Never include a REJECT row in target_seen, timeline, calculation, or final answer. If target_seen contains a rejected item, or if the timeline/calculation contains more or fewer accepted items than the final answer, redo the filtering before answering.
 8. Conclusion: state the answer you will put in agent_response or state that the information is not enough.
 
 Neutral target format example:
