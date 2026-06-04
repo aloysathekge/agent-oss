@@ -32,3 +32,29 @@ jobs:
       - name: Type-check with pyright
         run: pyright --pythonversion 3.11
         continue-on-error: true  # advisory until full type coverage is added
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        env:
+          OPENAI_API_KEY: sk-test-fake-key-for-ci
+          AGENT_ID: ci_agent
+          USER_ID: ci_user
+        run: pytest tests/ -v --tb=short
