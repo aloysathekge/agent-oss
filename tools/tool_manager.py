@@ -31,6 +31,7 @@ if not _raw_api_key:
 # Registry built once at import time. Adding a new skill requires a process
 # restart — fine for a prototype; hot-reload can be bolted on later.
 _SKILLS = discover_skills()
+_LAST_ROUTER_METRICS = {"input": 0, "output": 0, "total": 0}
 
 # Dedicated router model. Kept cheap/fast because it only ever emits a single word.
 _router_llm = ChatOpenAI(
@@ -38,6 +39,44 @@ _router_llm = ChatOpenAI(
     temperature=0,
     model="gpt-4o-mini",
 )
+
+
+def _get_token_metrics(response) -> dict:
+    metrics = {"input": 0, "output": 0, "total": 0}
+
+    if hasattr(response, "usage_metadata") and response.usage_metadata:
+        metrics["input"] = response.usage_metadata.get("input_tokens", 0)
+        metrics["output"] = response.usage_metadata.get("output_tokens", 0)
+        metrics["total"] = response.usage_metadata.get("total_tokens", 0)
+    elif (
+        hasattr(response, "response_metadata")
+        and "token_usage" in response.response_metadata
+    ):
+        usage = response.response_metadata["token_usage"]
+        if isinstance(usage, dict):
+            metrics["input"] = usage.get("prompt_tokens", 0)
+            metrics["output"] = usage.get("completion_tokens", 0)
+            metrics["total"] = usage.get("total_tokens", 0)
+
+    return metrics
+
+
+def get_last_router_metrics() -> dict:
+    return dict(_LAST_ROUTER_METRICS)
+
+
+def _skills_matching_triggers(user_prompt: str) -> list[str]:
+    prompt = re.sub(r"\s+", " ", str(user_prompt or "").lower()).strip()
+    if not prompt:
+        return []
+
+    matches = []
+    for name, info in _SKILLS.items():
+        raw_triggers = str(info.get("triggers") or "")
+        triggers = [trigger.strip().lower() for trigger in raw_triggers.split(",")]
+        if any(trigger and trigger in prompt for trigger in triggers):
+            matches.append(name)
+    return matches
 
 
 
@@ -72,8 +111,13 @@ async def select_skills(user_prompt: str, recent_history: str = "", memory_conte
     which skills — if any — the user's prompt calls for. Returns None for
     conceptual questions, chit-chat, or anything that doesn't require an action.
     """
+    global _LAST_ROUTER_METRICS
+    _LAST_ROUTER_METRICS = {"input": 0, "output": 0, "total": 0}
+
     if not _SKILLS:
         return []
+
+    trigger_choices = _skills_matching_triggers(user_prompt)
 
     catalog = "\n".join(
         f"- {name}: {info['description']}" for name, info in _SKILLS.items()
@@ -101,6 +145,7 @@ async def select_skills(user_prompt: str, recent_history: str = "", memory_conte
     5. Return ONLY the list of skill names. No punctuation other than commas. No explanation."""
 
     response = await _router_llm.ainvoke([HumanMessage(content=router_prompt)])
+    _LAST_ROUTER_METRICS = _get_token_metrics(response)
 
     # 🛠️ FIXED: Use the robust parser to strip formatting and thinking blocks
     content_str = extract_pure_text(response)
@@ -109,7 +154,10 @@ async def select_skills(user_prompt: str, recent_history: str = "", memory_conte
     raw_choices = str(content_str).strip().lower().replace(".", "").split(",")
     choices = [c.strip() for c in raw_choices]
     
-    valid_choices = [c for c in choices if c in _SKILLS]
+    valid_choices = []
+    for choice in trigger_choices + choices:
+        if choice in _SKILLS and choice not in valid_choices:
+            valid_choices.append(choice)
     return valid_choices
 
 

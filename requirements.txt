@@ -77,6 +77,7 @@ Pygments==2.20.0
 pyiceberg==0.11.1
 PyJWT==2.12.1
 pyparsing==3.3.2
+prompt_toolkit>=3.0.43,<4.0.0
 pyroaring==1.0.4
 pytest==9.0.3
 python-dateutil==2.9.0.post0
@@ -99,6 +100,7 @@ supabase==2.29.0
 supabase-auth==2.29.0
 supabase-functions==2.29.0
 tenacity==9.1.4
+textual>=0.89.1
 tiktoken==0.12.0
 tqdm==4.67.3
 typer==0.24.1

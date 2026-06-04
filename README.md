@@ -32,6 +32,10 @@ Benchmark cost warning: a full 500-question LongMemEval-S run with the current m
 - [Current Local Metrics](#current-local-metrics)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
+- [Control Console](#control-console)
+- [Agent Identity Config](#agent-identity-config)
+- [Channel Integrations](#channel-integrations)
+- [API Job Queue](#api-job-queue)
 - [Environment Variables](#environment-variables)
 - [Repository Map](#repository-map)
 - [Design Principles](#design-principles)
@@ -91,6 +95,9 @@ Quarq directly attacks those failure modes with retrieval decomposition, evidenc
 - Benchmark ingestion synchronization: benchmark memory-ingestion turns learn synchronously before returning, guarded by an ingestion lock.
 - Progressive tool loading: tool docs are only injected when a skill is selected.
 - Benchmark mode: disables tool routing, synchronously learns memory-ingestion chunks, and waits for any pending learning before final evaluation.
+- Local control console: starts the FastAPI worker, shows structured request/job/channel events, supports multiline input, command completion, and a scrollable transcript.
+- On-demand channel connections: channels are connected only when requested, starting with Telegram through a temporary Cloudflare tunnel and automatic webhook registration.
+- Local identity config: agent name, personality, use cases, and custom directives can be updated by tool call into a local JSON file instead of Supabase.
 
 ## Architecture
 
@@ -595,6 +602,8 @@ These metrics represent the current LongMemEval-S progress while Quarq Agent is 
 
 - Python 3.11 or higher
 - An [OpenAI API key](https://platform.openai.com/api-keys)
+- Optional for Telegram: a Telegram bot token from `@BotFather`
+- Optional for Telegram without a domain: `cloudflared` on your `PATH`
 
 ## Quick Start
 
@@ -614,19 +623,33 @@ pip install -r requirements.txt
 Create `.env`:
 
 ```bash
+cp .env.example .env
+```
+
+Minimum required values:
+
+```bash
 OPENAI_API_KEY=your_api_key
 USER_ID=local_user
 AGENT_ID=local_agent
 LOCAL_MEMORY_ROOT=local_memory
 ```
 
-Run the terminal agent:
+Run the local control console:
+
+```bash
+python agent_cli.py
+```
+
+The control console starts `main:app` for you, connects the CLI to the API job queue, and shows structured events as requests move through retrieval, tool routing, generation, tool use, and final response.
+
+You can still run the raw terminal agent directly:
 
 ```bash
 python agent.py
 ```
 
-Run the API server:
+Or run only the API server:
 
 ```bash
 uvicorn main:app --reload
@@ -640,6 +663,143 @@ curl -X POST http://127.0.0.1:8000/api/chat \
   -d '{"prompt": "What do you remember about me?", "channel_type": "web"}'
 ```
 
+## Control Console
+
+`agent_cli.py` is the recommended local entrypoint. It provides a Codex-style terminal surface around the local FastAPI worker:
+
+- starts `main:app` on `127.0.0.1:8000`
+- hides noisy HTTP client logs
+- shows a scrollable transcript of structured events
+- shows the current model label, working directory, API URL, connected channels, and startup channels
+- supports formatted Markdown in agent responses
+- supports multiline input: `Enter` sends, `Shift+Enter` inserts a newline
+- supports command suggestions when you type `/`, with `Tab` completing the first suggestion
+
+Console commands:
+
+```text
+/help
+/status
+/connect telegram
+set-default start-channel telegram
+set-default start-channel none
+/wipe
+/quit
+/up
+/down
+/bottom
+```
+
+`/connect telegram` starts the Telegram connection pipeline only when you ask for it. `set-default start-channel telegram` stores a local startup preference in `local_memory/<AGENT_ID>/agent_cli.json`, so future CLI launches can connect that channel automatically. `set-default start-channel none` clears that preference.
+
+## Agent Identity Config
+
+Quarq no longer needs Supabase for local identity updates. Runtime identity uses a local JSON config file, with `.env` values as defaults.
+
+Default location:
+
+```text
+local_memory/<AGENT_ID>/agent_identity.json
+```
+
+Override location:
+
+```bash
+AGENT_IDENTITY_CONFIG_PATH=local_memory/local_agent/agent_identity.json
+```
+
+Supported identity fields:
+
+```json
+{
+  "agent_name": "Quarq Agent",
+  "agent_personality": "professional and helpful",
+  "agent_use_cases": ["general assistance"],
+  "agent_custom_prompt": ""
+}
+```
+
+Initial values can come from `.env`:
+
+```bash
+AGENT_NAME=My_Quarq_Agent
+AGENT_PERSONALITY="friendly, precise, high-energy"
+AGENT_USE_CASES=["coding","research","life-long memory"]
+AGENT_CUSTOM_PROMPT="Be concise, grounded, and useful."
+```
+
+When the user asks the agent to rename itself, change its personality, update its main use cases, or change global instructions, the `agent_identity_manager` tool writes the update to the JSON config file. The env values remain fallback defaults for a new agent profile or a missing config file.
+
+## Channel Integrations
+
+Channels are API-facing integrations. The first supported channel is Telegram; the design leaves room for WhatsApp and other channels later.
+
+### Telegram
+
+1. Create a Telegram bot with `@BotFather`.
+2. Put the bot token in `.env`.
+3. Put your Telegram numeric user ID in `TELEGRAM_ALLOWED_USERS`.
+4. Set a random `TELEGRAM_WEBHOOK_SECRET`.
+5. Install `cloudflared` if you do not have a public domain.
+6. Run `python agent_cli.py`.
+7. In the console, run `/connect telegram`.
+
+Example `.env` values:
+
+```bash
+TELEGRAM_BOT_TOKEN=123456789:replace_with_botfather_token
+TELEGRAM_ALLOWED_USERS=123456789
+TELEGRAM_WEBHOOK_SECRET=replace_with_random_secret
+```
+
+What `/connect telegram` does:
+
+1. Starts a temporary Cloudflare tunnel to the local API.
+2. Builds the public webhook URL as `<tunnel-url>/api/telegram/webhook`.
+3. Calls Telegram `setWebhook` with the webhook secret.
+4. Shows channel registration progress in the CLI.
+
+Telegram messages are processed through the same API job queue as CLI messages. While a response is generating, the API sends Telegram `typing` chat actions so the chat feels alive instead of silent.
+
+Channel commands also work from Telegram:
+
+```text
+/help
+/status
+/wipe
+/quit
+```
+
+`/quit` only stops the local CLI when typed in the console. From Telegram it returns a safety message because remote channels should not stop the local process.
+
+## API Job Queue
+
+The FastAPI worker exposes both synchronous and job-based paths.
+
+Synchronous compatibility route:
+
+```text
+POST /api/chat
+```
+
+Job queue routes:
+
+```text
+POST /api/jobs
+GET  /api/jobs/{job_id}
+GET  /api/events?after=<event_id>
+```
+
+The CLI uses the job routes. A request is enqueued, the single worker processes jobs one by one, and status events are emitted for:
+
+- retrieval
+- tool routing
+- generation
+- tool running/completed/failed
+- final response
+
+This is what lets the console show useful loader text such as memory retrieval, response generation, and active tool usage instead of blocking silently until the final answer arrives.
+
 ## Environment Variables
 
 | Variable | Required | Description |
@@ -648,15 +808,28 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 | `AGENT_ID` | no | Selects the local memory namespace. Defaults to `local_agent`. |
 | `USER_ID` | API only | Required by `main.py` for the FastAPI worker. |
 | `LOCAL_MEMORY_ROOT` | no | Root folder for local memory. Defaults to `local_memory`. |
-| `AGENT_NAME` | no | Runtime persona name. |
-| `AGENT_PERSONALITY` | no | Runtime tone/personality. |
-| `AGENT_USE_CASES` | no | Comma-separated use-case description. |
-| `AGENT_CUSTOM_PROMPT` | no | Extra custom behavior instructions. |
+| `AGENT_IDENTITY_CONFIG_PATH` | no | Optional override for the local identity config file. Defaults to `local_memory/<AGENT_ID>/agent_identity.json`. |
+| `AGENT_NAME` | no | Default persona name when no local identity config exists. |
+| `AGENT_PERSONALITY` | no | Default tone/personality when no local identity config exists. |
+| `AGENT_USE_CASES` | no | Default use-case description. Accepts a JSON array or comma-separated string. |
+| `AGENT_CUSTOM_PROMPT` | no | Default custom behavior instructions when no local identity config exists. |
+| `QUARQ_AGENT_VERSION` | no | Display-only version label for the control console. Defaults to `v0.4.1`. |
+| `QUARQ_MODEL_LABEL` | no | Display-only model label for the control console. Falls back to generation model labels. |
+| `QUARQ_REASONING_EFFORT` | no | Optional display suffix for the console model label. |
+| `AGENT_DEBUG` | no | Set to `true`/`1` to show verbose debug logs from `agent.py`; metrics still print without debug. |
+| `TELEGRAM_BOT_TOKEN` | Telegram only | Bot token from `@BotFather`. Required for `/connect telegram`. |
+| `TELEGRAM_ALLOWED_USERS` | Telegram recommended | Comma-separated numeric Telegram user IDs allowed to use the local agent. |
+| `TELEGRAM_WEBHOOK_SECRET` | Telegram recommended | Secret token sent to Telegram `setWebhook` and verified by `/api/telegram/webhook`. |
+
+Agent identity updates are local-first. The `agent_identity_manager` tool writes
+to the JSON config file above, while env values remain startup defaults/fallbacks.
 
 ## Repository Map
 
 ```text
 agent.py                  Core LangGraph agent, memory, retrieval, generation, learning
+agent_cli.py              Local control console for API, jobs, events, and channels
+agent_config.py           Local agent identity config loader/saver
 agent_connector.py        Public async integration gateway
 main.py                   FastAPI single-tenant worker
 run_dataset_evals.py      LongMemEval evaluation runner
@@ -683,7 +856,7 @@ Quarq is built around a few hard rules:
 
 ## Status
 
-Quarq Agent v0.4.0 is an active OSS release candidate.
+Quarq Agent v0.4.1 is an active OSS release candidate.
 
 The current version is optimized for long-memory evaluation and single-user local memory. The next natural steps are:
 

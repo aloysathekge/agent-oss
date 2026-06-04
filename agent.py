@@ -1,4 +1,4 @@
-# Quarq Agent v0.4.0
+# Quarq Agent v0.4.1
 
 import os
 import json
@@ -7,10 +7,11 @@ import re
 import numpy as np
 import faiss
 from datetime import datetime
-from typing import TypedDict, Sequence
+from typing import Any, TypedDict, Sequence
 from dotenv import load_dotenv
 import shutil
 import time
+import sys
 
 from pydantic import SecretStr
 from langchain_openai import ChatOpenAI,OpenAIEmbeddings
@@ -26,6 +27,7 @@ import tools.tool_manager as tool_manager
 import uuid
 
 from functools import wraps
+from agent_config import load_agent_config
 
 # ==========================================
 # 1. SETUP & AUTHENTICATION
@@ -33,6 +35,18 @@ from functools import wraps
 load_dotenv()
 
 raw_api_key = os.getenv("OPENAI_API_KEY")
+
+
+def debug_enabled() -> bool:
+    env_value = str(os.getenv("AGENT_DEBUG", "")).lower()
+    return env_value in {"1", "true", "yes", "on"} or any(
+        arg in {"--debug", "--agent-debug"} for arg in sys.argv[1:]
+    )
+
+
+def debug_print(*args, **kwargs) -> None:
+    if debug_enabled():
+        print(*args, **kwargs)
 
 
 
@@ -1159,7 +1173,7 @@ class VectorMemoryManager:
             if len(self.memories) != before:
                 self._rebuild_index()
                 self._save_memories()
-                print(f"🗑️ [Memory] DELETED {self.memory_type} memory: {record_id}")
+                debug_print(f"🗑️ [Memory] DELETED {self.memory_type} memory: {record_id}")
                 return {"action": "DELETE", "id": record_id}
             return None
 
@@ -1176,7 +1190,7 @@ class VectorMemoryManager:
             if self.index.ntotal > 0:
                 scores, _ = self.index.search(vector, 1)
                 if scores[0][0] >= 0.95:
-                    print(f"🔄 [Memory] Skipped duplicate {self.memory_type} ADD.")
+                    debug_print(f"🔄 [Memory] Skipped duplicate {self.memory_type} ADD.")
                     return None
 
             now = self._action_entry_time(action, self._now())
@@ -1192,7 +1206,7 @@ class VectorMemoryManager:
             self.memories.append(memory)
             self.index.add(vector)
             self._save_memories()
-            print(f"✅ [Memory] ADDED {self.memory_type}: {content[:30]}...")
+            debug_print(f"✅ [Memory] ADDED {self.memory_type}: {content[:30]}...")
             return {"action": "ADD", "id": memory["id"], "memory": memory.copy()}
 
         if act_type == "UPDATE" and record_id:
@@ -1203,7 +1217,7 @@ class VectorMemoryManager:
                     memory["updated_at"] = self._now()
                     self._rebuild_index()
                     self._save_memories()
-                    print(f"✏️ [Memory] UPDATED {self.memory_type} memory: {record_id}")
+                    debug_print(f"✏️ [Memory] UPDATED {self.memory_type} memory: {record_id}")
                     return {"action": "UPDATE", "id": record_id, "memory": memory.copy()}
 
         return None
@@ -1224,7 +1238,7 @@ class VectorMemoryManager:
 
             normalized_content = re.sub(r"\s+", " ", content).lower()
             if normalized_content in seen_contents:
-                print(f"🔄 [Memory] Skipped exact duplicate {self.memory_type} ADD.")
+                debug_print(f"🔄 [Memory] Skipped exact duplicate {self.memory_type} ADD.")
                 continue
 
             seen_contents.add(normalized_content)
@@ -1250,7 +1264,7 @@ class VectorMemoryManager:
             if self.index.ntotal > 0:
                 scores, _ = self.index.search(vector, 1)
                 if scores[0][0] >= 0.95:
-                    print(f"🔄 [Memory] Skipped duplicate {self.memory_type} ADD.")
+                    debug_print(f"🔄 [Memory] Skipped duplicate {self.memory_type} ADD.")
                     continue
 
             created_at = self._action_entry_time(action, now)
@@ -1266,7 +1280,7 @@ class VectorMemoryManager:
             self.memories.append(memory)
             self.index.add(vector)
             results.append({"action": "ADD", "id": memory["id"], "memory": memory.copy()})
-            print(f"✅ [Memory] ADDED {self.memory_type}: {content[:30]}...")
+            debug_print(f"✅ [Memory] ADDED {self.memory_type}: {content[:30]}...")
 
         if results:
             self._save_memories()
@@ -1746,8 +1760,26 @@ def debug_json(value) -> str:
 
 def debug_memory_block(label: str, value: str) -> None:
     clean_value = str(value or "").strip()
-    print(f"\n[{label}]")
-    print(clean_value if clean_value else "None")
+    debug_print(f"\n[{label}]")
+    debug_print(clean_value if clean_value else "None")
+
+
+async def report_job_status(
+    state: dict,
+    stage: str,
+    message: str = "",
+    data: dict | None = None,
+) -> None:
+    callback = state.get("job_status_callback")
+    if not callback:
+        return
+
+    try:
+        result = callback(stage, message, data or {})
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception as exc:
+        debug_print(f"[Warning] Failed to update job status: {exc}")
 
 
 # ==========================================
@@ -1768,6 +1800,7 @@ class AgentState(TypedDict):
     channel_type: str  # NEW: e.g., 'telegram', 'whatsapp', 'terminal'
     metrics: dict
     current_date: str  # 🛠️ ADDED: To explicitly pass the benchmark date
+    job_status_callback: Any
 
 
 # ==========================================
@@ -1775,6 +1808,7 @@ class AgentState(TypedDict):
 # ==========================================
 async def retrieve_memories_node(state: AgentState):
     start_time = time.time()  # START TIMER
+    await report_job_status(state, "retrieval", "Building memory queries.")
 
     # 🛠️ BENCHMARK SYNC: If this is a final benchmark question, wait for all background memories to save FIRST!
     global PENDING_LEARNING_TASKS
@@ -2013,15 +2047,24 @@ async def retrieve_memories_node(state: AgentState):
     # 🛠️ DYNAMIC THRESHOLD APPLICATION
     current_threshold = 0.28 if search_mode == "deep" else 0.38
 
-    print(f"HYDE Mode: [{search_mode.upper()}] (Threshold: {current_threshold})")
-    print("HYDE Vector Queries:", search_queries)
+    current_top_k = 20 if search_mode == "deep" else 10
+
+    await report_job_status(
+        state,
+        "retrieval",
+        f"Searching memory in {search_mode.upper()} mode.",
+        {"search_mode": search_mode, "threshold": current_threshold},
+    )
+
+    debug_print(f"HYDE Mode: [{search_mode.upper()}] (Threshold: {current_threshold})")
+    debug_print("HYDE Vector Queries:", search_queries)
     if keywords:
-        print("HYDE Direct Keywords:", keywords)
+        debug_print("HYDE Direct Keywords:", keywords)
 
 
     # 🛠️ CHANGED: CONCURRENT SEARCH FOR ALL QUERIES USING DYNAMIC THRESHOLD
-    semantic_tasks = [semantic_db.search(sq, top_k=20, threshold=current_threshold) for sq in search_queries]
-    episodic_tasks = [episodic_db.search(sq, top_k=20, threshold=current_threshold) for sq in search_queries]
+    semantic_tasks = [semantic_db.search(sq, top_k=current_top_k, threshold=current_threshold) for sq in search_queries]
+    episodic_tasks = [episodic_db.search(sq, top_k=current_top_k, threshold=current_threshold) for sq in search_queries]
 
     if keywords:
         # Add the Keyword Search tasks to the concurrent pool
@@ -2142,7 +2185,7 @@ async def retrieve_memories_node(state: AgentState):
 
     end_time = time.time()  # END TIMER
 
-    print("\n--- Memory Retrieval Complete ---")
+    debug_print("\n--- Memory Retrieval Complete ---")
     # if semantic_result:
     #     print(f"Semantic Found:\n{semantic_result}")
     # if episodic_result:
@@ -2155,7 +2198,17 @@ async def retrieve_memories_node(state: AgentState):
     print(
         f"⏱️ [Metrics] Time: {end_time - start_time:.2f}s | Tokens: In({in_tokens}) Out({out_tokens})"
     )
-    print("---------------------------------\n")
+    debug_print("---------------------------------\n")
+    await report_job_status(
+        state,
+        "retrieval",
+        "Memory retrieval complete.",
+        {
+            "semantic_lines": len(str(semantic_result or "").splitlines()),
+            "episodic_lines": len(str(episodic_result or "").splitlines()),
+            "procedural_lines": len(str(procedural_result or "").splitlines()),
+        },
+    )
 
     return {
         "semantic_context": semantic_result,
@@ -2172,14 +2225,37 @@ async def retrieve_memories_node(state: AgentState):
 async def route_tools_node(state: AgentState):
     """Pick skills for this turn using the tool_manager."""
     start_time = time.time()
+    await report_job_status(state, "tool_routing", "Checking whether a tool is needed.")
+
+    def print_tool_metrics() -> None:
+        end_time = time.time()
+        router_metrics = tool_manager.get_last_router_metrics()
+        print(
+            f"⏱️ [Metrics] Tool Routing Time: {end_time - start_time:.2f}s | Tokens: In({router_metrics.get('input', 0)}) Out({router_metrics.get('output', 0)})"
+        )
+        debug_print("---------------------------------\n")
 
     # NEW: Disable tool calling entirely during benchmarks
     if state.get("channel_type") == "benchmark":
-        print("--- Tool Routing: Skipped (Benchmark Mode) ---")
+        debug_print("--- Tool Routing: Skipped (Benchmark Mode) ---")
+        print_tool_metrics()
+        await report_job_status(
+            state,
+            "tool_routing",
+            "Tool routing skipped for benchmark mode.",
+            {"skills": []},
+        )
         return {"selected_skills": [], "skill_markdown": ""}
 
     if is_memory_ingestion_prompt(state["user_prompt"]):
-        print("--- Tool Routing: Skipped (Memory Ingestion Mode) ---")
+        debug_print("--- Tool Routing: Skipped (Memory Ingestion Mode) ---")
+        print_tool_metrics()
+        await report_job_status(
+            state,
+            "tool_routing",
+            "Tool routing skipped for memory ingestion.",
+            {"skills": []},
+        )
         return {"selected_skills": [], "skill_markdown": ""}
 
     # We pass the history to the tool router for better intent detection
@@ -2201,20 +2277,30 @@ async def route_tools_node(state: AgentState):
     )
 
     if not chosen_skills:
-        print("--- Tool Routing: No skill selected ---")
+        debug_print("--- Tool Routing: No skill selected ---")
+        print_tool_metrics()
+        await report_job_status(
+            state,
+            "tool_routing",
+            "No tool needed for this request.",
+            {"skills": []},
+        )
         return {"selected_skills": [], "skill_markdown": ""}
 
-    print(f"--- Tool Routing: Skills Selected -> '{chosen_skills}' ---")
+    debug_print(f"--- Tool Routing: Skills Selected -> '{chosen_skills}' ---")
+    await report_job_status(
+        state,
+        "tool_routing",
+        "Tool skill selected.",
+        {"skills": chosen_skills},
+    )
 
     combined_markdown = ""
     for skill in chosen_skills:
         loaded = tool_manager.load_skill(skill)
         combined_markdown += f"\n### {skill.upper()} SKILL\n{loaded['markdown']}\n"
 
-    end_time = time.time()
-
-    print(f"⏱️ [Metrics] Time: {end_time - start_time:.2f}s")
-    print("---------------------------------\n")
+    print_tool_metrics()
     return {"selected_skills": chosen_skills, "skill_markdown": combined_markdown}
 
 
@@ -2223,6 +2309,7 @@ async def route_tools_node(state: AgentState):
 # ==========================================
 async def generate_response_node(state: AgentState):
     start_time = time.time()
+    await report_job_status(state, "generation", "Generating response.")
 
     # 1. INITIALIZE variables at the top of the function scope
     in_tokens = 0
@@ -2235,17 +2322,8 @@ async def generate_response_node(state: AgentState):
     global AGENT_CONFIG_CACHE  # 🛠️ Pull in the global cache
 
     if AGENT_CONFIG_CACHE is None:
-        print("📁 [Local Config] Loading Agent Config from environment/defaults...")
-        AGENT_CONFIG_CACHE = {
-            "agent_name": os.getenv("AGENT_NAME") or "Quarq Agent",
-            "agent_personality": os.getenv("AGENT_PERSONALITY") or "professional and helpful",
-            "agent_use_cases": [
-                item.strip()
-                for item in os.getenv("AGENT_USE_CASES", "general assistance").split(",")
-                if item.strip()
-            ],
-            "agent_custom_prompt": os.getenv("AGENT_CUSTOM_PROMPT") or "",
-        }
+        debug_print("📁 [Local Config] Loading Agent Config from local identity config...")
+        AGENT_CONFIG_CACHE = load_agent_config()
 
     cfg = AGENT_CONFIG_CACHE
     name = cfg.get("agent_name") or "Quarq Agent"
@@ -2274,6 +2352,23 @@ async def generate_response_node(state: AgentState):
 
     Your responses must strictly align with this identity and tone.
                 """.strip()
+
+    is_benchmark_channel = state.get("channel_type") == "benchmark"
+    normal_context_policy_instruction = ""
+    normal_general_question_hint = ""
+    if not is_benchmark_channel:
+        normal_context_policy_instruction = """
+    [NORMAL CHANNEL CONTEXT POLICY]
+    Normal channel mode is not benchmark mode.
+    - For user-specific memory questions about the user's past, preferences, possessions, plans, purchases, dates, current/latest personal state, or things they previously told you, retrieved memory is authoritative. If the required personal fact is not in retrieved memory, say that you do not have enough memory/context.
+    - For general conversation, advice, brainstorming, explanations, coding help, research-style thinking, or common-knowledge questions, answer normally using your own reasoning and knowledge. Retrieved memory may personalize the answer, but it is not a hard limit.
+    - REQUIRED_DATA is for missing user-memory facts, unresolved personal references, or missing values needed for a user-specific calculation. Do not trigger REQUIRED_DATA merely because a general advice question lacks personal memories.
+        """.strip()
+        normal_general_question_hint = """
+    [NORMAL-CHANNEL GENERAL QUESTION OVERRIDE]
+    If the user is not asking for a stored personal fact, do not force unrelated memories into the answer and do not build a strict memory ledger over irrelevant context.
+    In the <thinking> block, briefly state that this is a general question and whether any retrieved memory is relevant for personalization. Then answer directly in agent_response.
+        """.strip()
 
     system_instruction = f"""You are a highly advanced, disciplined AI assistant created by QuarqLabs Team.
 
@@ -2336,6 +2431,17 @@ async def generate_response_node(state: AgentState):
         "hyde_queries": ["keyword one", "keyword two", "keyword three"] 
     }}
     """
+    if not is_benchmark_channel:
+        system_instruction = system_instruction.replace(
+            "\n\n    TOOL USE PROTOCOL:",
+            f"\n\n    {normal_context_policy_instruction}\n\n    TOOL USE PROTOCOL:",
+            1,
+        )
+        system_instruction = system_instruction.replace(
+            "    - Recommendation Blindspots: The user asks for open-ended recommendations, but you lack data on their explicit dislikes or past constraints.",
+            "    - Recommendation Blindspots: For user-specific personalization requests, the user asks for open-ended recommendations, but you lack data on their explicit dislikes or past constraints. For broad/general advice in normal channel mode, answer normally with a transparent caveat instead of triggering REQUIRED_DATA solely for missing preference memories.",
+            1,
+        )
 
     preference_answer_hint = """
         [QUESTION-TYPE GUIDANCE]
@@ -2364,7 +2470,7 @@ async def generate_response_node(state: AgentState):
         """.rstrip()
 
     benchmark_span_aggregation_hint = ""
-    if state.get("channel_type") == "benchmark":
+    if is_benchmark_channel:
         benchmark_span_aggregation_hint = """
         [BENCHMARK TEMPORAL CONSISTENCY HINT]
         Some benchmark histories contain wrapper/question timestamps that conflict with narrative dates inside user-stated completed events.
@@ -2382,7 +2488,7 @@ async def generate_response_node(state: AgentState):
         state.get("procedural_context", ""), keep_ids=False
     )
 
-    print(f"""
+    debug_print(f"""
 
     Retrieved context:
     Within each memory block, memories are listed newest-to-oldest by storage recency.
@@ -2539,10 +2645,28 @@ async def generate_response_node(state: AgentState):
     User question at this time ({question_time_str}):
     {state["user_prompt"]}
     """
+    if not is_benchmark_channel:
+        final_user_prompt = final_user_prompt.replace(
+            "    Deduce the response for the user question using only the retrieved context below.",
+            "    Answer the user question. Use retrieved context for user-specific memory facts, and use your own reasoning and knowledge for general conversation or advice.",
+            1,
+        )
+        final_user_prompt = final_user_prompt.replace(
+            "    - Do not use outside knowledge, assumptions, guesses, or hallucinated facts.",
+            """    - For user-specific memory facts, do not use outside assumptions: ground the answer in ACCEPT evidence from retrieved context or say the memory is insufficient.
+    - For general questions/advice/conversation, retrieved context is optional personalization, not a hard limit; answer normally from your own reasoning and knowledge.
+    - Do not return REQUIRED_DATA just because no personal memory is needed for a general question.""",
+            1,
+        )
+        final_user_prompt = final_user_prompt.replace(
+            "    Before the JSON response, write a <thinking> block with:",
+            f"    {normal_general_question_hint}\n\n    Before the JSON response, write a <thinking> block with:",
+            1,
+        )
 
-    print("user prompt:")
+    debug_print("user prompt:")
 
-    print(f"""User question at this time ({question_time_str}):
+    debug_print(f"""User question at this time ({question_time_str}):
     {state["user_prompt"]} """)
 
     if state.get("skill_markdown"):
@@ -2561,7 +2685,7 @@ async def generate_response_node(state: AgentState):
     is_memory_ingestion = is_memory_ingestion_prompt(state["user_prompt"])
 
     if is_memory_ingestion:
-        print("🧠 [Ingestion] Memory review prompt detected; skipping generation LLM.")
+        debug_print("🧠 [Ingestion] Memory review prompt detected; skipping generation LLM.")
         last_response = AIMessage(
             content=json.dumps(
                 {
@@ -2610,14 +2734,24 @@ async def generate_response_node(state: AgentState):
                 fn = next((t for t in tools_list if t.name == call["name"]), None)
                 if fn:
                     try:
-                        print(
+                        await report_job_status(
+                            state,
+                            "tool",
+                            f"Using tool: {call['name']}",
+                            {
+                                "tool_name": call["name"],
+                                "tool_status": "running",
+                                "loop": iteration + 1,
+                            },
+                        )
+                        debug_print(
                             f"🔧 [Loop {iteration+1}] Executing Tool: {call['name']}..."
                         )
 
                         # 🚀 NEW: CACHE INVALIDATION INTERCEPTOR
                         # If the agent uses the identity update tool, wipe the cache!
                         if call["name"] == "update_agent_identity":
-                            print(
+                            debug_print(
                                 "🔄 [Cache] Agent identity updated. Invalidating config cache."
                             )
                             AGENT_CONFIG_CACHE = None
@@ -2632,10 +2766,40 @@ async def generate_response_node(state: AgentState):
                         }
 
                         result = fn.invoke(call["args"], config=run_config)
+                        await report_job_status(
+                            state,
+                            "tool",
+                            f"Tool completed: {call['name']}",
+                            {
+                                "tool_name": call["name"],
+                                "tool_status": "completed",
+                                "loop": iteration + 1,
+                            },
+                        )
                     except Exception as e:
                         result = f"Error: {e}"
+                        await report_job_status(
+                            state,
+                            "tool",
+                            f"Tool failed: {call['name']}",
+                            {
+                                "tool_name": call["name"],
+                                "tool_status": "failed",
+                                "loop": iteration + 1,
+                            },
+                        )
                 else:
                     result = "Tool not found."
+                    await report_job_status(
+                        state,
+                        "tool",
+                        f"Tool not found: {call['name']}",
+                        {
+                            "tool_name": call["name"],
+                            "tool_status": "failed",
+                            "loop": iteration + 1,
+                        },
+                    )
 
                 tool_msgs.append(
                     ToolMessage(content=str(result), tool_call_id=call["id"])
@@ -2680,10 +2844,10 @@ async def generate_response_node(state: AgentState):
 
 
      # 🐞 ADD THIS DEBUG BLOCK 🐞
-    print("\n" + "="*50)
-    print("🐞 [DEBUG] RAW PASS 1 OUTPUT (WITH THINKING):")
-    print(last_response.content)
-    print("="*50 + "\n")
+    debug_print("\n" + "="*50)
+    debug_print("🐞 [DEBUG] RAW PASS 1 OUTPUT (WITH THINKING):")
+    debug_print(last_response.content)
+    debug_print("="*50 + "\n")
     
     final_output = ""
     flags = []
@@ -2703,17 +2867,17 @@ async def generate_response_node(state: AgentState):
 
     target_queries = extract_target_queries_from_thinking(raw_text)
     if target_queries:
-        print("Target Queries:")
-        print(target_queries)
+        debug_print("Target Queries:")
+        debug_print(target_queries)
 
     if "REQUIRED_DATA" in flags and target_queries:
         dynamic_queries = _dedupe_keep_order(list(dynamic_queries) + target_queries)
 
-    print("New dynamic Queries:")
-    print(dynamic_queries)
+    debug_print("New dynamic Queries:")
+    debug_print(dynamic_queries)
 
     if "REQUIRED_DATA" in flags and dynamic_queries:
-        print(f"🔄 [Self-Correction] Agent requested specific data. Queries: {dynamic_queries}")
+        debug_print(f"🔄 [Self-Correction] Agent requested specific data. Queries: {dynamic_queries}")
         
         # Run targeted search using the LLM's exact keyword pairs
         fb_sem_tasks = [semantic_db.search(sq, top_k=20, threshold=0.28) for sq in dynamic_queries]
@@ -2898,7 +3062,7 @@ User question at this time ({question_time_str}):
 """
         new_messages = [SystemMessage(content=system_instruction)] + list(state["chat_history"]) + [HumanMessage(content=new_user_prompt)]
         
-        print("🧠 [Self-Correction] New context loaded. Re-generating JSON response...")
+        debug_print("🧠 [Self-Correction] New context loaded. Re-generating JSON response...")
         fallback_response = await gen_llm.ainvoke(new_messages)
         
         # Update metrics
@@ -2907,10 +3071,10 @@ User question at this time ({question_time_str}):
         out_tokens += m_fb["output"]
 
         # 🐞 ADD THIS DEBUG BLOCK 🐞
-        print("\n" + "="*50)
-        print("🐞 [DEBUG] RAW PASS 2 (FALLBACK) OUTPUT:")
-        print(fallback_response.content)
-        print("="*50 + "\n")
+        debug_print("\n" + "="*50)
+        debug_print("🐞 [DEBUG] RAW PASS 2 (FALLBACK) OUTPUT:")
+        debug_print(fallback_response.content)
+        debug_print("="*50 + "\n")
         
         # Parse the Fallback JSON
         fb_json_str = extract_json_block(str(fallback_response.content))
@@ -2929,7 +3093,10 @@ User question at this time ({question_time_str}):
     if not final_output:
         final_output = "I have processed that request using my tools, but I don't have a specific summary to display. Please let me know if you need anything else."
 
-    print(f"Agent Response :{final_output}")
+    await report_job_status(state, "finalizing", "Finalizing response.")
+
+    if state["channel_type"] != "terminal":
+        print(f"Agent Response :{final_output}")
 
     end_time = time.time()
     print(
@@ -2972,7 +3139,7 @@ User question at this time ({question_time_str}):
                 )
 
         if run_ingestion_inline:
-            print("🧠 [Benchmark Ingestion] Running learning inline before returning response.")
+            debug_print("🧠 [Benchmark Ingestion] Running learning inline before returning response.")
             await bounded_learning()
         else:
             # Fire-and-forget, but track it in the global set
@@ -3664,7 +3831,7 @@ async def learn_procedural_memory(
 
                 changed = await execute_procedural_action(act)
                 if changed:
-                    print(f"✅ [Rules] {act_type} completed locally.")
+                    debug_print(f"✅ [Rules] {act_type} completed locally.")
                     actions_executed += 1
 
         except json.JSONDecodeError:
@@ -3729,18 +3896,18 @@ async def learn_ingestion_memory_pairs(
     episodic_tokens = {"input": 0, "output": 0, "total": 0}
     procedural_tokens = {"input": 0, "output": 0, "total": 0}
 
-    print("\n" + "=" * 80)
-    print(f"🧠 [Ingestion Learning] Split chunk into {len(pair_payloads)} pair(s).")
-    print("🧠 [Ingestion Learning] Vector memories will be staged in RAM and committed after all pairs.")
-    print("=" * 80)
+    debug_print("\n" + "=" * 80)
+    debug_print(f"🧠 [Ingestion Learning] Split chunk into {len(pair_payloads)} pair(s).")
+    debug_print("🧠 [Ingestion Learning] Vector memories will be staged in RAM and committed after all pairs.")
+    debug_print("=" * 80)
 
     for pair_index, pair_payload in enumerate(pair_payloads, start=1):
         pair_prompt = wrap_memory_ingestion_payload(pair_payload)
 
-        print("\n" + "-" * 80)
-        print(f"🧠 [Ingestion Learning] Feeding pair {pair_index}/{len(pair_payloads)}")
-        print("[Pair Payload]")
-        print(pair_payload)
+        debug_print("\n" + "-" * 80)
+        debug_print(f"🧠 [Ingestion Learning] Feeding pair {pair_index}/{len(pair_payloads)}")
+        debug_print("[Pair Payload]")
+        debug_print(pair_payload)
         debug_memory_block("Working Semantic BEFORE pair", working_semantic_ctx)
         debug_memory_block("Working Episodic BEFORE pair", working_episodic_ctx)
         debug_memory_block("Working Procedural BEFORE pair", working_procedural_ctx)
@@ -3786,12 +3953,12 @@ async def learn_ingestion_memory_pairs(
         _, epi_metrics, epi_actions = pair_results[1]
         pro_count, pro_metrics = pair_results[2]
 
-        print(f"\n[Pair {pair_index}/{len(pair_payloads)} Semantic Actions]")
-        print(debug_json(sem_actions))
-        print(f"\n[Pair {pair_index}/{len(pair_payloads)} Episodic Actions]")
-        print(debug_json(epi_actions))
-        print(f"\n[Pair {pair_index}/{len(pair_payloads)} Procedural Changes]")
-        print(pro_count)
+        debug_print(f"\n[Pair {pair_index}/{len(pair_payloads)} Semantic Actions]")
+        debug_print(debug_json(sem_actions))
+        debug_print(f"\n[Pair {pair_index}/{len(pair_payloads)} Episodic Actions]")
+        debug_print(debug_json(epi_actions))
+        debug_print(f"\n[Pair {pair_index}/{len(pair_payloads)} Procedural Changes]")
+        debug_print(pro_count)
 
         procedural_count += pro_count
 
@@ -3821,22 +3988,22 @@ async def learn_ingestion_memory_pairs(
         debug_memory_block("Working Semantic AFTER pair", working_semantic_ctx)
         debug_memory_block("Working Episodic AFTER pair", working_episodic_ctx)
         debug_memory_block("Working Procedural AFTER pair", working_procedural_ctx)
-        print(f"🧠 [Ingestion Learning] Pair {pair_index}/{len(pair_payloads)} complete; updated working memory will be passed to the next pair.")
-        print("-" * 80)
+        debug_print(f"🧠 [Ingestion Learning] Pair {pair_index}/{len(pair_payloads)} complete; updated working memory will be passed to the next pair.")
+        debug_print("-" * 80)
 
     semantic_commit_actions = build_staged_vector_commit_actions(semantic_stage)
     episodic_commit_actions = build_staged_vector_commit_actions(episodic_stage)
 
-    print("\n" + "=" * 80)
-    print("🧠 [Ingestion Learning] All pairs complete. Final working memories before DB commit:")
+    debug_print("\n" + "=" * 80)
+    debug_print("🧠 [Ingestion Learning] All pairs complete. Final working memories before DB commit:")
     debug_memory_block("Final Working Semantic", working_semantic_ctx)
     debug_memory_block("Final Working Episodic", working_episodic_ctx)
     debug_memory_block("Final Working Procedural", working_procedural_ctx)
-    print("\n[Final Semantic Actions Committed To DB]")
-    print(debug_json(semantic_commit_actions))
-    print("\n[Final Episodic Actions Committed To DB]")
-    print(debug_json(episodic_commit_actions))
-    print("=" * 80)
+    debug_print("\n[Final Semantic Actions Committed To DB]")
+    debug_print(debug_json(semantic_commit_actions))
+    debug_print("\n[Final Episodic Actions Committed To DB]")
+    debug_print(debug_json(episodic_commit_actions))
+    debug_print("=" * 80)
 
     semantic_commit, episodic_commit = await asyncio.gather(
         semantic_db.execute_actions_with_results(semantic_commit_actions),
@@ -3845,9 +4012,9 @@ async def learn_ingestion_memory_pairs(
     semantic_count = len(semantic_commit)
     episodic_count = len(episodic_commit)
 
-    print("\n" + "=" * 80)
-    print(f"🧠 [Ingestion Learning] DB commit complete: Semantic={semantic_count}, Episodic={episodic_count}, Procedural={procedural_count}")
-    print("=" * 80)
+    debug_print("\n" + "=" * 80)
+    debug_print(f"🧠 [Ingestion Learning] DB commit complete: Semantic={semantic_count}, Episodic={episodic_count}, Procedural={procedural_count}")
+    debug_print("=" * 80)
 
     return [
         (semantic_count, semantic_tokens),
@@ -3908,22 +4075,22 @@ async def update_memories_node(state: AgentState):
 
     end_time = time.time()  # END TIMER
 
-    print("\n--- Memory Learning Complete ---")
+    debug_print("\n--- Memory Learning Complete ---")
     if sem_content:
-        print(f"💡 Learned Semantic: {sem_content}")
+        debug_print(f"💡 Learned Semantic: {sem_content}")
     if epi_content:
-        print(f"💡 Learned Episodic: {epi_content}")
+        debug_print(f"💡 Learned Episodic: {epi_content}")
     if broad_epi_content:
-        print(f"💡 Learned Broad Episodic: {broad_epi_content}")
+        debug_print(f"💡 Learned Broad Episodic: {broad_epi_content}")
     if pro_content:
-        print(f"💡 Learned Procedural: {pro_content}")
+        debug_print(f"💡 Learned Procedural: {pro_content}")
     if not any([sem_content, epi_content, broad_epi_content, pro_content]):
-        print("No new memories learned this turn.")
+        debug_print("No new memories learned this turn.")
 
-    print(
+    debug_print(
         f"⏱️ [Metrics] Learning Time: {end_time - start_time:.2f}s | Total Tokens: In({total_in}) Out({total_out})"
     )
-    print("--------------------------------\n")
+    debug_print("--------------------------------\n")
     return {"metrics": current_metrics}
 
 
@@ -3977,22 +4144,22 @@ async def background_memory_update(
 
     end_time = time.time()
 
-    print("\n--- Background Memory Learning Complete ---")
+    debug_print("\n--- Background Memory Learning Complete ---")
     if sem_content:
-        print(f"💡 Learned Semantic: {sem_content}")
+        debug_print(f"💡 Learned Semantic: {sem_content}")
     if epi_content:
-        print(f"💡 Learned Episodic: {epi_content}")
+        debug_print(f"💡 Learned Episodic: {epi_content}")
     if broad_epi_content:
-        print(f"💡 Learned Broad Episodic: {broad_epi_content}")
+        debug_print(f"💡 Learned Broad Episodic: {broad_epi_content}")
     if pro_content:
-        print(f"💡 Learned Procedural: {pro_content}")
+        debug_print(f"💡 Learned Procedural: {pro_content}")
     if not any([sem_content, epi_content, broad_epi_content, pro_content]):
-        print("No new memories learned this turn.")
+        debug_print("No new memories learned this turn.")
 
-    print(
+    debug_print(
         f"⏱️ [Metrics] Background Learning Time: {end_time - start_time:.2f}s | Total Tokens: In({total_in}) Out({total_out})"
     )
-    print("--------------------------------\n")
+    debug_print("--------------------------------\n")
 
 
 # ==========================================
@@ -4020,7 +4187,7 @@ app = workflow.compile()
 
 async def main_chat_loop():
     print(
-        "🤖 Quarq Agent  V3 - Cognitive Memory Editor, Temporal Truth Protocol, and Background Learning"
+        "🤖 Quarq Agent  V4 - Self Reflective loop ,  Cognitive Memory Editor, Temporal Truth Protocol, and Background Learning"
     )
     chat_history = []
     while True:

@@ -251,6 +251,22 @@ If the EXPECTED answer contains a numeric value:
 - Accept approximate wording ("about", "around", "roughly") ONLY when the same underlying number is stated.
 - Do not accept different numbers.
 
+8A. NUMERIC RANGE ACCEPTANCE (CRITICAL):
+
+When the EXPECTED answer is a numeric value derived from
+underlying quantities that may themselves be approximate,
+uncertain, or expressed as ranges, accept an AGENT answer
+that provides a mathematically consistent range or interval
+instead of a single value, provided that:
+
+- the EXPECTED value is consistent with the AGENT answer,
+- the AGENT answer does not contradict the EXPECTED answer,
+- the AGENT answer reflects the same underlying facts,
+- the AGENT does not introduce unsupported numeric claims.
+
+Do not reject an answer solely because it preserves uncertainty
+that was already present in the underlying information.
+
 9. DURATION GRANULARITY:
 If the EXPECTED answer gives a duration in weeks, months, or years, accept an answer that gives the same duration plus smaller-unit detail, provided it does not contradict the expected value.
 

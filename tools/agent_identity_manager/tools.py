@@ -1,85 +1,86 @@
 """LangChain @tool functions for the Agent Identity Manager skill.
 
-This allows the agent to update its own core persona parameters (name, tone, 
-use cases, and custom prompts) in the Supabase database.
+The active agent identity is stored in a local JSON config file. Environment
+values are only startup defaults when the local file or a field is missing.
 """
-import os
+
+from __future__ import annotations
+
 import json
-from langchain_core.tools import tool
+from typing import Any
+
 from langchain_core.runnables import RunnableConfig
-from supabase import create_client, Client
+from langchain_core.tools import tool
 
-# Initialize Supabase client
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+from agent_config import get_agent_identity_config_path, save_agent_config
 
-if SUPABASE_URL and SUPABASE_KEY:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-else:
-    supabase = None
+
+def _clean_text(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+def _parse_use_cases(agent_use_cases_json: str) -> list[str] | str:
+    try:
+        parsed: Any = json.loads(agent_use_cases_json)
+    except json.JSONDecodeError:
+        return "Error: agent_use_cases_json is not valid JSON."
+
+    if not isinstance(parsed, list) or not all(
+        isinstance(item, str) and item.strip() for item in parsed
+    ):
+        return "Error: agent_use_cases_json must be a valid JSON array of non-empty strings."
+
+    seen = set()
+    use_cases = []
+    for item in parsed:
+        cleaned = " ".join(item.split())
+        if cleaned not in seen:
+            seen.add(cleaned)
+            use_cases.append(cleaned)
+
+    return use_cases
 
 
 @tool
 def update_agent_identity(
-    agent_name: str = None, 
-    agent_personality: str = None, 
-    agent_use_cases_json: str = None, 
-    agent_custom_prompt: str = None, 
-    config: RunnableConfig = None
+    agent_name: str = None,
+    agent_personality: str = None,
+    agent_use_cases_json: str = None,
+    agent_custom_prompt: str = None,
+    config: RunnableConfig = None,
 ) -> str:
-    """Updates the core identity of the agent in the database."""
-    
-    if not supabase:
-        return "Error: Database connection not configured."
-
-    user_id = config.get("configurable", {}).get("user_id")
-    agent_id = os.getenv("AGENT_ID") 
-
-    if not user_id or not agent_id:
-        return "Error: Could not authenticate user or agent identity."
+    """Updates the core local identity of the agent."""
 
     updates = {}
-    
-    # 🛠️ FIX: Explicitly check for truthy values (ignores None and "")
-    if agent_name and str(agent_name).strip():
-        updates["agent_name"] = str(agent_name).strip()
-        
-    if agent_personality and str(agent_personality).strip():
-        # 🛠️ FIX: Enforce the "Single Word" constraint
-        words = str(agent_personality).strip().split()
-        if len(words) > 1:
-            updates["agent_personality"] = words[0] # Take only the first word
-        else:
-            updates["agent_personality"] = words[0]
-            
-    if agent_custom_prompt and str(agent_custom_prompt).strip():
-        updates["agent_custom_prompt"] = str(agent_custom_prompt).strip()
-    
-    if agent_use_cases_json and str(agent_use_cases_json).strip():
-        try:
-            parsed_cases = json.loads(agent_use_cases_json)
-            if isinstance(parsed_cases, list):
-                updates["agent_use_cases"] = parsed_cases
-            else:
-                return "Error: agent_use_cases_json must be a valid JSON array of strings."
-        except json.JSONDecodeError:
-            return "Error: agent_use_cases_json is not valid JSON."
+
+    name = _clean_text(agent_name)
+    if name:
+        updates["agent_name"] = name
+
+    personality = _clean_text(agent_personality)
+    if personality:
+        updates["agent_personality"] = personality
+
+    if agent_custom_prompt is not None:
+        updates["agent_custom_prompt"] = _clean_text(agent_custom_prompt)
+
+    use_cases_text = _clean_text(agent_use_cases_json)
+    if use_cases_text:
+        use_cases = _parse_use_cases(use_cases_text)
+        if isinstance(use_cases, str):
+            return use_cases
+        updates["agent_use_cases"] = use_cases
 
     if not updates:
-        return "No valid updates provided. Nothing was changed in the database."
+        return "No valid updates provided. Nothing was changed in the local identity config."
 
     try:
-        res = supabase.table("agent_containers").update(updates).eq("id", agent_id).execute()
-        
-        if len(res.data) == 0:
-            return "Error: Agent record not found in the database."
-            
-        success_msg = "Successfully updated core identity parameters:\n"
-        for k, v in updates.items():
-            success_msg += f"- {k}: {v}\n"
-            
-        return success_msg
+        saved_config = save_agent_config(updates)
+    except OSError as exc:
+        return f"Local Config Error: Failed to update agent identity. {exc}"
 
-    except Exception as e:
-        return f"Database Error: Failed to update agent identity. {str(e)}"
-
+    success_msg = "Successfully updated local identity config:\n"
+    for key in updates:
+        success_msg += f"- {key}: {saved_config.get(key)}\n"
+    success_msg += f"\nConfig file: {get_agent_identity_config_path()}"
+    return success_msg
