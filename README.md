@@ -423,6 +423,9 @@ Users can inspect and expand the enabled cloud toolkit at runtime:
 ```
 
 Enabled cloud tools are stored in `local_memory/<AGENT_ID>/agent_tools.json`, with `.env` values used as startup defaults.
+`/cloud-tools` fetches the available cloud-tool catalog when credentials are
+configured, then falls back to the small local catalog if the remote catalog is
+unavailable.
 
 ### Adding A New Tool
 
