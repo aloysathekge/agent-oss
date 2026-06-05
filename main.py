@@ -29,6 +29,7 @@ from local_channel_store import (
     get_recent_history_items,
     list_chat_history_channels,
     recent_attachment_ids,
+    refresh_attachments_for_context,
     render_attachment_context,
     store_attachment_from_bytes,
 )
@@ -498,6 +499,7 @@ async def run_chat_job(job_id: str) -> None:
         for attachment_id in req.attachment_ids:
             if attachment_id not in context_attachment_ids:
                 context_attachment_ids.append(attachment_id)
+        await refresh_attachments_for_context(context_attachment_ids)
         attachment_context = render_attachment_context(context_attachment_ids)
         response, metrics, contexts = await get_quarq_response(
             user_prompt=req.prompt,
@@ -640,6 +642,13 @@ async def keep_telegram_typing(chat_id: int):
         except Exception as e:
             logger.debug("Telegram typing action failed: %s", e)
         await asyncio.sleep(TELEGRAM_TYPING_INTERVAL_SECONDS)
+
+
+def telegram_message_from_update(update: dict) -> tuple[dict, str]:
+    for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
+        if update.get(key):
+            return update[key] or {}, key
+    return {}, "unknown"
 
 
 def format_file_size(size_bytes: int | None) -> str:
@@ -862,7 +871,7 @@ def prompt_for_telegram_message(text: str, attachment_records: list[dict]) -> st
 
 
 async def process_telegram_update(update: dict):
-    message = update.get("message") or update.get("edited_message") or {}
+    message, update_kind = telegram_message_from_update(update)
     text = str(message.get("text") or message.get("caption") or "").strip()
     file_refs = telegram_file_references(message)
     chat = message.get("chat") or {}
@@ -882,9 +891,10 @@ async def process_telegram_update(update: dict):
 
     await record_event(
         "telegram",
-        "Telegram inbound",
+        "Telegram edit inbound" if update_kind.startswith("edited_") else "Telegram inbound",
         text or f"{len(file_refs)} attachment(s)",
         {
+            "update_kind": update_kind,
             "chat_id": chat_id,
             "telegram_user_id": telegram_user_id,
             "username": username,

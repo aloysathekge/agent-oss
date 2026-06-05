@@ -19,6 +19,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_HISTORY_WINDOW_MESSAGES = 8
 DEFAULT_ATTACHMENT_CONTEXT_CHARS = 16000
 DEFAULT_ATTACHMENT_EXTRACT_CHARS = 24000
+DEFAULT_PDF_VISION_MAX_PAGES = 3
 
 TEXT_EXTENSIONS = {
     ".csv",
@@ -170,6 +171,31 @@ def save_attachment_index(index: dict[str, dict[str, Any]]) -> None:
     atomic_write_json(get_attachments_index_path(), index)
 
 
+def attachment_path(record: dict[str, Any]) -> Path:
+    relative_path = record.get("relative_path")
+    if not relative_path:
+        raise ValueError("attachment record is missing relative_path")
+    return get_channel_storage_root() / str(relative_path)
+
+
+def attachment_needs_reprocess(record: dict[str, Any]) -> bool:
+    extract = record.get("extract") or {}
+    if str(extract.get("text") or "").strip():
+        return False
+    if extract.get("error") or extract.get("ai_extract_error"):
+        return True
+
+    mime_type = str(record.get("mime_type") or "")
+    source_kind = str(record.get("source_kind") or "")
+    return (
+        mime_type.startswith("text/")
+        or mime_type in {"application/pdf"}
+        or mime_type.startswith("image/")
+        or mime_type.startswith("audio/")
+        or source_kind in {"audio", "voice", "photo", "document"}
+    )
+
+
 def guess_mime_type(filename: str | None, content: bytes) -> str:
     guessed, _ = mimetypes.guess_type(filename or "")
     if guessed:
@@ -201,7 +227,15 @@ def extract_pdf_file(path: Path, max_chars: int) -> dict[str, Any]:
     try:
         from pypdf import PdfReader
     except Exception as exc:
-        return {"extract_type": "pdf", "text": "", "error": f"pypdf unavailable: {exc}"}
+        return {
+            "extract_type": "pdf",
+            "text": "",
+            "error": (
+                "PDF text extraction requires pypdf. "
+                "Run `pip install -r requirements.txt` in this environment. "
+                f"Original error: {exc}"
+            ),
+        }
 
     try:
         reader = PdfReader(str(path))
@@ -211,11 +245,13 @@ def extract_pdf_file(path: Path, max_chars: int) -> dict[str, Any]:
             if sum(len(item) for item in pages) >= max_chars:
                 break
         text, truncated = truncate_text("\n\n".join(pages).strip(), max_chars)
+        error = "" if text else "No embedded PDF text was found; vision fallback is required."
         return {
             "extract_type": "pdf",
             "text": text,
             "truncated": truncated,
             "page_count": len(reader.pages),
+            "error": error,
         }
     except Exception as exc:
         return {"extract_type": "pdf", "text": "", "error": str(exc)}
@@ -325,10 +361,93 @@ async def enrich_audio_with_openai(path: Path, max_chars: int) -> dict[str, Any]
         return {"ai_extract_error": str(exc)}
 
 
+def render_pdf_pages(path: Path, max_pages: int) -> list[dict[str, Any]]:
+    try:
+        import fitz
+    except Exception as exc:
+        raise RuntimeError(
+            "PDF vision fallback requires PyMuPDF. Run `pip install -r requirements.txt` "
+            f"in this environment. Original error: {exc}"
+        ) from exc
+
+    rendered_pages = []
+    document = fitz.open(str(path))
+    try:
+        page_count = min(len(document), max_pages)
+        for page_index in range(page_count):
+            page = document.load_page(page_index)
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            rendered_pages.append(
+                {
+                    "page": page_index + 1,
+                    "mime_type": "image/png",
+                    "bytes": pixmap.tobytes("png"),
+                }
+            )
+    finally:
+        document.close()
+    return rendered_pages
+
+
+async def enrich_pdf_with_openai(path: Path, max_chars: int) -> dict[str, Any]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {}
+
+    try:
+        from openai import AsyncOpenAI
+
+        max_pages = int(os.getenv("PDF_VISION_MAX_PAGES", str(DEFAULT_PDF_VISION_MAX_PAGES)))
+        rendered_pages = render_pdf_pages(path, max_pages=max_pages)
+        if not rendered_pages:
+            return {"ai_extract_error": "PDF contained no renderable pages."}
+
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "Extract the readable text and important structure from this PDF. "
+                    "This may be a resume/CV or scanned document. Preserve names, "
+                    "headings, roles, dates, skills, links, education, projects, and "
+                    "actionable details. Return concise plain text."
+                ),
+            }
+        ]
+        for page in rendered_pages:
+            encoded = base64.b64encode(page["bytes"]).decode("ascii")
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{page['mime_type']};base64,{encoded}"},
+                }
+            )
+
+        client = AsyncOpenAI(api_key=api_key)
+        response = await client.chat.completions.create(
+            model=os.getenv("MULTIMODAL_IMAGE_MODEL", "gpt-4o-mini"),
+            messages=[{"role": "user", "content": content}],
+            max_tokens=1600,
+        )
+        text = response.choices[0].message.content or ""
+        text, truncated = truncate_text(text, max_chars)
+        return {
+            "text": text,
+            "ai_extract_type": "pdf_vision_ocr",
+            "truncated": truncated,
+            "vision_pages": len(rendered_pages),
+        }
+    except Exception as exc:
+        return {"ai_extract_error": str(exc)}
+
+
 async def enrich_attachment_if_supported(record: dict[str, Any], path: Path, max_chars: int) -> dict[str, Any]:
     mime_type = str(record.get("mime_type") or "")
     if mime_type.startswith("image/"):
         return await enrich_image_with_openai(path, mime_type, max_chars)
+    if mime_type == "application/pdf" or path.suffix.lower() == ".pdf":
+        extract = record.get("extract") or {}
+        if not str(extract.get("text") or "").strip():
+            return await enrich_pdf_with_openai(path, max_chars)
     if mime_type.startswith("audio/") or str(record.get("source_kind") or "") in {"audio", "voice"}:
         return await enrich_audio_with_openai(path, max_chars)
     return {}
@@ -374,11 +493,56 @@ async def store_attachment_from_bytes(
     ai_extract = await enrich_attachment_if_supported(record, path, max_extract_chars)
     if ai_extract:
         record["extract"].update(ai_extract)
+        if str(ai_extract.get("text") or "").strip():
+            record["extract"].pop("error", None)
 
     index = load_attachment_index()
     index[attachment_id] = record
     save_attachment_index(index)
     return record
+
+
+async def reprocess_attachment_record(record: dict[str, Any]) -> dict[str, Any]:
+    path = attachment_path(record)
+    if not path.exists():
+        record["extract"] = {
+            "extract_type": "missing",
+            "text": "",
+            "error": f"Stored attachment file is missing: {record.get('relative_path')}",
+        }
+        return record
+
+    max_extract_chars = int(os.getenv("ATTACHMENT_EXTRACT_MAX_CHARS", DEFAULT_ATTACHMENT_EXTRACT_CHARS))
+    mime_type = str(record.get("mime_type") or guess_mime_type(record.get("original_filename"), path.read_bytes()))
+    extraction = basic_extract_attachment(path, mime_type, max_extract_chars)
+    record["mime_type"] = mime_type
+    record["extract"] = extraction
+
+    ai_extract = await enrich_attachment_if_supported(record, path, max_extract_chars)
+    if ai_extract:
+        record["extract"].update(ai_extract)
+        if str(ai_extract.get("text") or "").strip():
+            record["extract"].pop("error", None)
+
+    record["reprocessed_at"] = now_iso()
+    return record
+
+
+async def refresh_attachments_for_context(attachment_ids: list[str]) -> None:
+    if not attachment_ids:
+        return
+
+    index = load_attachment_index()
+    changed = False
+    for attachment_id in attachment_ids:
+        record = index.get(attachment_id)
+        if not record or not attachment_needs_reprocess(record):
+            continue
+        index[attachment_id] = await reprocess_attachment_record(record)
+        changed = True
+
+    if changed:
+        save_attachment_index(index)
 
 
 def get_attachment_record(attachment_id: str) -> dict[str, Any] | None:

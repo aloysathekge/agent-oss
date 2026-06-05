@@ -1068,7 +1068,12 @@ async def set_telegram_webhook(
 ) -> dict[str, Any]:
     payload = {
         "url": webhook_url,
-        "allowed_updates": ["message"],
+        "allowed_updates": [
+            "message",
+            "edited_message",
+            "channel_post",
+            "edited_channel_post",
+        ],
         "drop_pending_updates": False,
     }
     if secret:

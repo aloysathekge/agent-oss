@@ -251,6 +251,12 @@ and audio get best-effort local extraction or AI-assisted description/transcript
 when supported. The stored file remains available even when readable text cannot
 yet be extracted.
 
+PDF extraction uses `pypdf` for embedded text. If a PDF has no embedded text or
+behaves like a scanned/image document, Quarq can render the first few pages with
+`PyMuPDF` and send them through the configured multimodal image model for
+vision OCR. Make sure `pip install -r requirements.txt` has been run in the same
+virtual environment that starts `main.py` or `agent_cli.py`.
+
 Each semantic and episodic memory record includes:
 
 - UUID
@@ -871,6 +877,7 @@ This is what lets the console show useful loader text such as memory retrieval, 
 | `ATTACHMENT_EXTRACT_MAX_CHARS` | no | Max extracted text saved from an attachment. Defaults to `24000`. |
 | `MULTIMODAL_IMAGE_MODEL` | no | Optional OpenAI model for image descriptions. Defaults to `gpt-4o-mini`. |
 | `MULTIMODAL_AUDIO_MODEL` | no | Optional OpenAI model for audio transcription. Defaults to `gpt-4o-mini-transcribe`. |
+| `PDF_VISION_MAX_PAGES` | no | Max PDF pages rendered for vision OCR fallback when embedded text extraction fails. Defaults to `3`. |
 | `AGENT_IDENTITY_CONFIG_PATH` | no | Optional override for the local identity config file. Defaults to `local_memory/<AGENT_ID>/agent_identity.json`. |
 | `AGENT_NAME` | no | Default persona name when no local identity config exists. |
 | `AGENT_PERSONALITY` | no | Default tone/personality when no local identity config exists. |
