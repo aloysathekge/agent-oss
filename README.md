@@ -231,9 +231,25 @@ local_memory/
       memories.json
     procedural_memory/
       rules.json
+    channel_state/
+      chat_history.json
+      attachments_index.json
+      attachments/
 ```
 
 `AGENT_ID` determines which memory folder is used. Reusing the same `AGENT_ID` reuses the same memory. Changing `AGENT_ID` gives you a clean isolated agent profile.
+
+Channel state is also durable. CLI, Telegram, and future channels store full
+conversation history in `channel_state/chat_history.json`, while each agent
+request receives only the last eight messages (four user/assistant pairs) as
+short-term chat context. Command responses such as `/cloud-tools` are saved
+there too, so follow-ups can refer to them.
+
+Incoming files are saved under `channel_state/attachments/` and indexed in
+`attachments_index.json`. Text, Markdown, JSON, CSV, PDFs, DOCX files, images,
+and audio get best-effort local extraction or AI-assisted description/transcript
+when supported. The stored file remains available even when readable text cannot
+yet be extracted.
 
 Each semantic and episodic memory record includes:
 
@@ -758,6 +774,13 @@ When the user asks the agent to rename itself, change its personality, update it
 
 Channels are API-facing integrations. The first supported channel is Telegram; the design leaves room for WhatsApp and other channels later.
 
+Telegram supports text, captions, photos, documents, PDFs, DOCX files, audio,
+voice notes, videos, stickers, and other Telegram file objects. Every received
+file is downloaded into local channel storage, indexed with source metadata, and
+passed to the current agent job as attachment context. Future channel adapters
+can use the same generic `POST /api/files` endpoint, then include the returned
+attachment IDs in `/api/jobs` or `/api/chat`.
+
 ### Telegram
 
 1. Create a Telegram bot with `@BotFather`.
@@ -837,6 +860,11 @@ This is what lets the console show useful loader text such as memory retrieval, 
 | `AGENT_ID` | no | Selects the local memory namespace. Defaults to `local_agent`. |
 | `USER_ID` | API only | Required by `main.py` for the FastAPI worker. |
 | `LOCAL_MEMORY_ROOT` | no | Root folder for local memory. Defaults to `local_memory`. |
+| `LOCAL_CHANNEL_STORAGE_ROOT` | no | Optional override for durable channel chat history and attachment storage. Defaults to `local_memory/<AGENT_ID>/channel_state`. |
+| `CHANNEL_FILE_MAX_BYTES` | no | Max accepted channel attachment size in bytes. Defaults to `25000000`. |
+| `ATTACHMENT_EXTRACT_MAX_CHARS` | no | Max extracted text saved from an attachment. Defaults to `24000`. |
+| `MULTIMODAL_IMAGE_MODEL` | no | Optional OpenAI model for image descriptions. Defaults to `gpt-4o-mini`. |
+| `MULTIMODAL_AUDIO_MODEL` | no | Optional OpenAI model for audio transcription. Defaults to `gpt-4o-mini-transcribe`. |
 | `AGENT_IDENTITY_CONFIG_PATH` | no | Optional override for the local identity config file. Defaults to `local_memory/<AGENT_ID>/agent_identity.json`. |
 | `AGENT_NAME` | no | Default persona name when no local identity config exists. |
 | `AGENT_PERSONALITY` | no | Default tone/personality when no local identity config exists. |
@@ -865,6 +893,7 @@ agent_cli.py              Local control console for API, jobs, events, and chann
 agent_config.py           Local agent identity config loader/saver
 agent_connector.py        Public async integration gateway
 main.py                   FastAPI single-tenant worker
+local_channel_store.py    Durable channel history and attachment storage
 run_dataset_evals.py      LongMemEval evaluation runner
 run_dataset_evals_parallel.py
                           Parallel LongMemEval evaluation runner

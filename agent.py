@@ -1814,6 +1814,7 @@ class AgentState(TypedDict):
     metrics: dict
     current_date: str  # 🛠️ ADDED: To explicitly pass the benchmark date
     job_status_callback: Any
+    attachments_context: str
 
 
 # ==========================================
@@ -2502,6 +2503,22 @@ async def generate_response_node(state: AgentState):
     generation_procedural_context = format_memory_context_for_prompt(
         state.get("procedural_context", ""), keep_ids=False
     )
+    attachment_context = str(state.get("attachments_context") or "").strip()
+    attachment_prompt_block = ""
+    if attachment_context:
+        attachment_prompt_block = f"""
+    [CURRENT MESSAGE ATTACHMENTS]
+    The user attached file(s) to the current or recent channel message. Treat this attachment context as current-message evidence.
+    Use extracted text, transcript, image description, and metadata below when answering file-related questions.
+    If no readable text was extracted, say what was received and what is missing instead of inventing the file contents.
+
+    {attachment_context}
+        """.rstrip()
+        system_instruction += """
+
+    [ATTACHMENT HANDLING]
+    When CURRENT MESSAGE ATTACHMENTS are present, they are part of the user's current message. Use them directly for summaries, extraction, analysis, and follow-up references such as "this file", "that PDF", "the image", or "the audio".
+        """.rstrip()
 
     debug_print(f"""
 
@@ -2537,6 +2554,8 @@ async def generate_response_node(state: AgentState):
 
     [PROCEDURAL - Strict Rules]
     {generation_procedural_context}
+
+    {attachment_prompt_block}
 
     Grounding rules:
     - Do not use outside knowledge, assumptions, guesses, or hallucinated facts.
@@ -3079,6 +3098,8 @@ Within each memory block, memories are listed newest-to-oldest by storage recenc
 
 [PROCEDURAL - Strict Rules]
 {fallback_procedural_context}
+
+{attachment_prompt_block}
 
 {preference_answer_hint}
 {knowledge_update_answer_hint}
@@ -4236,6 +4257,9 @@ async def main_chat_loop():
             "user_id": "local_terminal_user",  # ADDED
             "channel_type": "terminal",  # ADDED
             "metrics": {},
+            "current_date": None,
+            "job_status_callback": None,
+            "attachments_context": "",
         }
         final_state = await app.ainvoke(initial_state)
         print(f"\n🤖 Agent: {final_state['final_response']}")

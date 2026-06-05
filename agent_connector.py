@@ -23,6 +23,7 @@ async def get_quarq_response(
     status_callback: Optional[
         Callable[[str, str, Optional[dict]], Awaitable[Any]]
     ] = None,
+    attachments_context: str = "",
 ) -> Tuple[str, dict,dict]:
     """
     Public API to invoke the Quarq Agent.
@@ -54,6 +55,7 @@ async def get_quarq_response(
         "metrics": {}, # NEW: Initialize empty metrics bucket
         "current_date":current_date,
         "job_status_callback": status_callback,
+        "attachments_context": attachments_context,
     }
 
     try:

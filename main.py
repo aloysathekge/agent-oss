@@ -17,11 +17,21 @@ from typing import Optional
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from agent_connector import get_quarq_response
 from agent import wipe_all_memories_for_api
 from agent_tools_config import handle_tool_command, load_enabled_cloud_tools
+from local_channel_store import (
+    append_attachment_note,
+    append_chat_pair,
+    decode_base64_payload,
+    get_recent_history_items,
+    list_chat_history_channels,
+    recent_attachment_ids,
+    render_attachment_context,
+    store_attachment_from_bytes,
+)
 from tools.composio.client import clear_composio_session_cache
 
 logging.basicConfig(
@@ -49,6 +59,7 @@ TELEGRAM_MESSAGE_LIMIT = 3900
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 TELEGRAM_TYPING_INTERVAL_SECONDS = 4
+CHANNEL_FILE_MAX_BYTES = int(os.getenv("CHANNEL_FILE_MAX_BYTES", "25000000"))
 EVENT_BUFFER_SIZE = 300
 CHAT_HISTORY_WINDOW_MESSAGES = 8
 
@@ -62,7 +73,6 @@ JOB_DONE_EVENTS: dict[str, asyncio.Event] = {}
 JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 JOB_LOCK = asyncio.Lock()
 JOB_WORKER_TASK: asyncio.Task | None = None
-CHAT_HISTORIES: dict[str, list[BaseMessage]] = {}
 CHAT_HISTORY_LOCK = asyncio.Lock()
 
 
@@ -71,6 +81,18 @@ class ChatRequest(BaseModel):
     channel_type: str = "web"
     skip_learning: bool = False
     current_date: Optional[str] = None
+    conversation_id: Optional[str] = None
+    attachment_ids: list[str] = Field(default_factory=list)
+
+
+class FileIngestRequest(BaseModel):
+    data_base64: str
+    filename: Optional[str] = None
+    mime_type: Optional[str] = None
+    channel_type: str = "api"
+    conversation_id: Optional[str] = None
+    source_kind: str = "file"
+    source_metadata: dict = Field(default_factory=dict)
 
 
 def now_iso() -> str:
@@ -103,7 +125,7 @@ def status_payload() -> dict:
         "telegram_allowed_users_configured": TELEGRAM_ALLOWED_USERS is not None,
         "job_queue_size": JOB_QUEUE.qsize(),
         "enabled_cloud_tools": load_enabled_cloud_tools(),
-        "chat_history_channels": list(CHAT_HISTORIES),
+        "chat_history_channels": list_chat_history_channels(),
     }
 
 
@@ -141,6 +163,19 @@ async def handle_channel_command(prompt: str, channel_type: str) -> Optional[dic
         {"channel": channel_type, "command": command},
     )
     return {"response": response, "metrics": {}, "contexts": {}, "command": command}
+
+
+async def handle_and_store_channel_command(req: ChatRequest) -> Optional[dict]:
+    command_result = await handle_channel_command(req.prompt, req.channel_type)
+    if command_result:
+        await append_chat_history(
+            req.channel_type,
+            req.prompt,
+            command_result["response"],
+            conversation_id=req.conversation_id,
+            attachment_ids=req.attachment_ids,
+        )
+    return command_result
 
 
 async def record_event(
@@ -222,29 +257,44 @@ def public_skill_names(skills: list | None) -> list:
     return public_names
 
 
-def chat_history_key(channel_type: str) -> str:
-    return str(channel_type or "web").strip().lower() or "web"
-
-
-async def get_recent_chat_history(channel_type: str) -> list[BaseMessage]:
-    key = chat_history_key(channel_type)
+async def get_recent_chat_history(
+    channel_type: str,
+    conversation_id: str | None = None,
+) -> list[BaseMessage]:
     async with CHAT_HISTORY_LOCK:
-        return list(CHAT_HISTORIES.get(key, [])[-CHAT_HISTORY_WINDOW_MESSAGES:])
+        items = get_recent_history_items(
+            channel_type,
+            conversation_id,
+            limit=CHAT_HISTORY_WINDOW_MESSAGES,
+        )
+
+    messages: list[BaseMessage] = []
+    for item in items:
+        content = append_attachment_note(
+            str(item.get("content") or ""),
+            item.get("attachment_ids") or [],
+        )
+        if item.get("role") == "ai":
+            messages.append(AIMessage(content=content))
+        else:
+            messages.append(HumanMessage(content=content))
+    return messages
 
 
 async def append_chat_history(
     channel_type: str,
     user_prompt: str,
     agent_response: str,
+    conversation_id: str | None = None,
+    attachment_ids: list[str] | None = None,
 ) -> None:
-    key = chat_history_key(channel_type)
     async with CHAT_HISTORY_LOCK:
-        history = CHAT_HISTORIES.setdefault(key, [])
-        history.extend(
-            [
-                HumanMessage(content=user_prompt),
-                AIMessage(content=agent_response),
-            ]
+        append_chat_pair(
+            channel_type,
+            user_prompt,
+            agent_response,
+            conversation_id=conversation_id,
+            attachment_ids=attachment_ids or [],
         )
 
 
@@ -369,7 +419,9 @@ async def enqueue_chat_job(req: ChatRequest) -> dict:
         {
             "job_id": job_id,
             "channel": req.channel_type,
+            "conversation_id": req.conversation_id,
             "skip_learning": req.skip_learning,
+            "attachment_count": len(req.attachment_ids),
         },
     )
     return serialize_job(job)
@@ -437,7 +489,15 @@ async def run_chat_job(job_id: str) -> None:
 
     try:
         await update_job_progress(job_id, "retrieval", "Searching memory.")
-        chat_history = await get_recent_chat_history(req.channel_type)
+        chat_history = await get_recent_chat_history(req.channel_type, req.conversation_id)
+        context_attachment_ids = []
+        for attachment_id in recent_attachment_ids(req.channel_type, req.conversation_id):
+            if attachment_id not in context_attachment_ids:
+                context_attachment_ids.append(attachment_id)
+        for attachment_id in req.attachment_ids:
+            if attachment_id not in context_attachment_ids:
+                context_attachment_ids.append(attachment_id)
+        attachment_context = render_attachment_context(context_attachment_ids)
         response, metrics, contexts = await get_quarq_response(
             user_prompt=req.prompt,
             user_id=AGENT_USER_ID,
@@ -446,8 +506,15 @@ async def run_chat_job(job_id: str) -> None:
             skip_learning=req.skip_learning,
             current_date=req.current_date,
             status_callback=status_callback,
+            attachments_context=attachment_context,
         )
-        await append_chat_history(req.channel_type, req.prompt, response)
+        await append_chat_history(
+            req.channel_type,
+            req.prompt,
+            response,
+            conversation_id=req.conversation_id,
+            attachment_ids=req.attachment_ids,
+        )
         elapsed = time.perf_counter() - started
         result = {"response": response, "metrics": metrics, "contexts": contexts}
         await complete_job(job_id, result)
@@ -458,9 +525,11 @@ async def run_chat_job(job_id: str) -> None:
             {
                 "job_id": job_id,
                 "channel": req.channel_type,
+                "conversation_id": req.conversation_id,
                 "elapsed": round(elapsed, 2),
                 "metrics": metrics,
                 "contexts": context_line_counts(contexts),
+                "attachment_count": len(req.attachment_ids),
             },
         )
     except Exception as e:
@@ -572,20 +641,170 @@ async def keep_telegram_typing(chat_id: int):
         await asyncio.sleep(TELEGRAM_TYPING_INTERVAL_SECONDS)
 
 
+def telegram_file_references(message: dict) -> list[dict]:
+    refs = []
+
+    if message.get("photo"):
+        photos = message.get("photo") or []
+        best_photo = max(
+            photos,
+            key=lambda item: item.get("file_size") or (item.get("width", 0) * item.get("height", 0)),
+        )
+        refs.append(
+            {
+                "kind": "photo",
+                "file_id": best_photo.get("file_id"),
+                "filename": f"telegram_photo_{best_photo.get('file_unique_id') or best_photo.get('file_id')}.jpg",
+                "mime_type": "image/jpeg",
+                "metadata": {
+                    "width": best_photo.get("width"),
+                    "height": best_photo.get("height"),
+                    "file_size": best_photo.get("file_size"),
+                },
+            }
+        )
+
+    field_map = {
+        "document": "document",
+        "audio": "audio",
+        "voice": "voice",
+        "video": "video",
+        "video_note": "video_note",
+        "animation": "animation",
+        "sticker": "sticker",
+    }
+    for field, kind in field_map.items():
+        value = message.get(field)
+        if not value:
+            continue
+        refs.append(
+            {
+                "kind": kind,
+                "file_id": value.get("file_id"),
+                "filename": value.get("file_name") or f"telegram_{kind}_{value.get('file_unique_id') or value.get('file_id')}",
+                "mime_type": value.get("mime_type"),
+                "metadata": {
+                    key: value.get(key)
+                    for key in (
+                        "file_size",
+                        "duration",
+                        "width",
+                        "height",
+                        "emoji",
+                        "set_name",
+                    )
+                    if value.get(key) is not None
+                },
+            }
+        )
+
+    return [ref for ref in refs if ref.get("file_id")]
+
+
+async def download_telegram_file(file_id: str) -> tuple[bytes, dict]:
+    file_info = await telegram_api_call("getFile", {"file_id": file_id})
+    result = file_info.get("result") or {}
+    file_size = int(result.get("file_size") or 0)
+    if file_size and file_size > CHANNEL_FILE_MAX_BYTES:
+        raise RuntimeError(
+            f"Telegram file is {file_size} bytes, above CHANNEL_FILE_MAX_BYTES={CHANNEL_FILE_MAX_BYTES}."
+        )
+
+    file_path = result.get("file_path")
+    if not file_path:
+        raise RuntimeError("Telegram did not return a downloadable file path.")
+
+    url = f"{TELEGRAM_API_BASE}/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+    async with httpx.AsyncClient(timeout=90) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        content = response.content
+
+    if len(content) > CHANNEL_FILE_MAX_BYTES:
+        raise RuntimeError(
+            f"Telegram file is {len(content)} bytes, above CHANNEL_FILE_MAX_BYTES={CHANNEL_FILE_MAX_BYTES}."
+        )
+    return content, result
+
+
+async def store_telegram_attachments(
+    refs: list[dict],
+    chat_id: int,
+    telegram_user_id: int | None,
+    username: str,
+    update_id: int | None,
+) -> list[dict]:
+    records = []
+    for ref in refs:
+        try:
+            content, file_info = await download_telegram_file(ref["file_id"])
+            metadata = {
+                "telegram_user_id": telegram_user_id,
+                "username": username,
+                "chat_id": chat_id,
+                "update_id": update_id,
+                "telegram_file": file_info,
+                **(ref.get("metadata") or {}),
+            }
+            record = await store_attachment_from_bytes(
+                content,
+                filename=ref.get("filename"),
+                mime_type=ref.get("mime_type"),
+                channel_type="telegram",
+                conversation_id=str(chat_id),
+                source_kind=ref.get("kind") or "telegram_file",
+                source_metadata=metadata,
+            )
+            records.append(record)
+            await record_event(
+                "attachment",
+                "Attachment stored",
+                f"{record.get('original_filename') or record.get('stored_filename')} saved.",
+                {
+                    "channel": "telegram",
+                    "conversation_id": str(chat_id),
+                    "attachment_id": record.get("id"),
+                    "mime_type": record.get("mime_type"),
+                    "size_bytes": record.get("size_bytes"),
+                },
+            )
+        except Exception as exc:
+            await record_event(
+                "error",
+                "Attachment storage failed",
+                str(exc),
+                {"channel": "telegram", "file_id": ref.get("file_id"), "kind": ref.get("kind")},
+            )
+    return records
+
+
+def prompt_for_telegram_message(text: str, attachment_records: list[dict]) -> str:
+    if text:
+        return text
+    labels = [
+        str(record.get("original_filename") or record.get("stored_filename") or record.get("id"))
+        for record in attachment_records
+    ]
+    if labels:
+        return "I sent these attachment(s). Please read them and respond: " + ", ".join(labels)
+    return ""
+
+
 async def process_telegram_update(update: dict):
-    message = update.get("message") or {}
-    text = str(message.get("text") or "").strip()
+    message = update.get("message") or update.get("edited_message") or {}
+    text = str(message.get("text") or message.get("caption") or "").strip()
+    file_refs = telegram_file_references(message)
     chat = message.get("chat") or {}
     sender = message.get("from") or {}
     chat_id = chat.get("id")
     telegram_user_id = sender.get("id")
     username = sender.get("username") or sender.get("first_name") or "unknown"
 
-    if not text or chat_id is None:
+    if (not text and not file_refs) or chat_id is None:
         await record_event(
             "telegram",
             "Telegram update ignored",
-            "No text message was present in the update.",
+            "No supported message content was present in the update.",
             {"update_id": update.get("update_id")},
         )
         return
@@ -593,11 +812,12 @@ async def process_telegram_update(update: dict):
     await record_event(
         "telegram",
         "Telegram inbound",
-        text,
+        text or f"{len(file_refs)} attachment(s)",
         {
             "chat_id": chat_id,
             "telegram_user_id": telegram_user_id,
             "username": username,
+            "attachment_count": len(file_refs),
         },
     )
 
@@ -621,13 +841,43 @@ async def process_telegram_update(update: dict):
         return
 
     try:
-        command_result = await handle_channel_command(text, "telegram")
+        attachment_records = await store_telegram_attachments(
+            file_refs,
+            chat_id=chat_id,
+            telegram_user_id=telegram_user_id,
+            username=username,
+            update_id=update.get("update_id"),
+        )
+        if file_refs and not attachment_records and not text:
+            await send_telegram_message(
+                chat_id,
+                "I received the file, but could not store or read it locally. Please try again with a smaller file.",
+            )
+            return
+
+        command_result = None
+        if text and not attachment_records:
+            command_req = ChatRequest(
+                prompt=text,
+                channel_type="telegram",
+                conversation_id=str(chat_id),
+                skip_learning=False,
+            )
+            command_result = await handle_and_store_channel_command(command_req)
         if command_result:
             await send_telegram_message(chat_id, command_result["response"])
             return
 
+        prompt = prompt_for_telegram_message(text, attachment_records)
+        attachment_ids = [record["id"] for record in attachment_records]
         job = await enqueue_chat_job(
-            ChatRequest(prompt=text, channel_type="telegram", skip_learning=False)
+            ChatRequest(
+                prompt=prompt,
+                channel_type="telegram",
+                conversation_id=str(chat_id),
+                attachment_ids=attachment_ids,
+                skip_learning=False,
+            )
         )
         typing_task = asyncio.create_task(keep_telegram_typing(chat_id))
         try:
@@ -668,7 +918,7 @@ async def create_job(req: ChatRequest):
     if not req.prompt or not req.prompt.strip():
         raise HTTPException(status_code=400, detail="prompt is required")
 
-    command_result = await handle_channel_command(req.prompt, req.channel_type)
+    command_result = await handle_and_store_channel_command(req)
     if command_result:
         job = await create_completed_job(req, command_result)
         return {"job": job}
@@ -686,13 +936,55 @@ async def get_job(job_id: str):
     return {"job": job}
 
 
+@app.post("/api/files", status_code=201)
+async def ingest_file(req: FileIngestRequest):
+    try:
+        content = decode_base64_payload(req.data_base64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="data_base64 must be valid base64") from None
+
+    if len(content) > CHANNEL_FILE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"file is above CHANNEL_FILE_MAX_BYTES={CHANNEL_FILE_MAX_BYTES}",
+        )
+
+    try:
+        record = await store_attachment_from_bytes(
+            content,
+            filename=req.filename,
+            mime_type=req.mime_type,
+            channel_type=req.channel_type,
+            conversation_id=req.conversation_id,
+            source_kind=req.source_kind,
+            source_metadata=req.source_metadata,
+        )
+        await record_event(
+            "attachment",
+            "Attachment stored",
+            f"{record.get('original_filename') or record.get('stored_filename')} saved.",
+            {
+                "channel": req.channel_type,
+                "conversation_id": req.conversation_id,
+                "attachment_id": record.get("id"),
+                "mime_type": record.get("mime_type"),
+                "size_bytes": record.get("size_bytes"),
+            },
+        )
+        return {"attachment": record}
+    except Exception as e:
+        logger.error("File ingest error: %s", e, exc_info=True)
+        await record_event("error", "Attachment storage failed", str(e), {"channel": req.channel_type})
+        raise HTTPException(status_code=500, detail="file ingest failed") from e
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     if not req.prompt or not req.prompt.strip():
         raise HTTPException(status_code=400, detail="prompt is required")
 
     try:
-        command_result = await handle_channel_command(req.prompt, req.channel_type)
+        command_result = await handle_and_store_channel_command(req)
         if command_result:
             return command_result
 
