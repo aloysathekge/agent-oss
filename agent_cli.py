@@ -32,6 +32,8 @@ from rich.padding import Padding
 from rich.rule import Rule
 from rich.text import Text
 
+from agent_tools_config import format_slug_list, load_enabled_cloud_tools
+
 try:
     from textual.app import App as TextualApp
     from textual.binding import Binding
@@ -316,7 +318,7 @@ class TextualTerminalUi:
         self.model_label = model_label()
         self.directory_label = compact_path(BASE_DIR)
         self.agent_name = os.getenv("AGENT_NAME", "Quarq Agent").strip() or "Quarq Agent"
-        self.agent_version = os.getenv("QUARQ_AGENT_VERSION", "v0.4.1").strip() or "v0.4.1"
+        self.agent_version = os.getenv("QUARQ_AGENT_VERSION", "v0.4.4").strip() or "v0.4.4"
         self.connected_channels: set[str] = set()
         self.default_start_channels = set(load_cli_config().get("startup_channels", []))
         self.output_blocks.append(welcome_block())
@@ -611,7 +613,7 @@ class TerminalUi:
             ("class:header.title", " Quarq Agent"),
             ("class:header.dim", f"\n api {self.api_base}"),
             ("class:header.dim", "\n channels local"),
-            ("class:header.dim", "\n commands /help /status /connect /set-default /wipe /quit"),
+            ("class:header.dim", "\n commands /help /status /tools /cloud-tools /connect /wipe /quit"),
         ]
 
     def _input_label_fragments(self) -> list[tuple[str, str]]:
@@ -1363,6 +1365,31 @@ COMMAND_OPTIONS = [
         "description": "show current API and channel configuration",
     },
     {
+        "name": "/tools",
+        "insert": "/tools",
+        "description": "list enabled native and cloud tools",
+    },
+    {
+        "name": "/which-tool",
+        "insert": "/which-tool ",
+        "description": "show which tool fits a task",
+    },
+    {
+        "name": "/cloud-tools",
+        "insert": "/cloud-tools",
+        "description": "list cloud tools available to enable",
+    },
+    {
+        "name": "/add-tool",
+        "insert": "/add-tool ",
+        "description": "enable a cloud tool",
+    },
+    {
+        "name": "/remove-tool",
+        "insert": "/remove-tool ",
+        "description": "disable a cloud tool",
+    },
+    {
         "name": "/connect",
         "insert": "/connect telegram ",
         "description": "connect a channel on demand",
@@ -1376,21 +1403,6 @@ COMMAND_OPTIONS = [
         "name": "/quit",
         "insert": "/quit",
         "description": "stop the local control console",
-    },
-    {
-        "name": "/up",
-        "insert": "/up",
-        "description": "scroll transcript older",
-    },
-    {
-        "name": "/down",
-        "insert": "/down",
-        "description": "scroll transcript newer",
-    },
-    {
-        "name": "/bottom",
-        "insert": "/bottom",
-        "description": "jump to newest transcript row",
     },
     {
         "name": "set-default start-channel",
@@ -1448,12 +1460,19 @@ def local_help_text(intro: bool = False) -> str:
         [
             "- `/help` - show available commands",
             "- `/status` - show current API and channel configuration",
+            "- `/tools` - list enabled native and cloud tools",
+            "- `/which-tool <task>` - show which tool fits a task",
+            "- `/cloud-tools` - list cloud tools available to enable",
+            "- `/add-tool <tool>` - enable a cloud tool",
+            "- `/remove-tool <tool>` - disable a cloud tool",
             "- `/connect telegram` - start a channel connection on demand",
             "- `set-default start-channel telegram` - auto-connect a channel on future startup",
             "- `set-default start-channel none` - clear startup channel connections",
             "- `/wipe` - clear local memories",
             "- `/quit` - stop the local control console",
-            "- `/up`, `/down`, `/bottom` - move through the transcript",
+            "",
+            f"Enabled cloud tools: {format_slug_list(load_enabled_cloud_tools())}",
+            "Expand tools with `/cloud-tools`, then `/add-tool <tool>`.",
         ]
     )
     return "\n".join(rows)
@@ -1707,7 +1726,7 @@ def print_header(console: Console, api_base: str) -> None:
     console.print(Text("Quarq Agent", style="bold white"))
     console.print(
         Text(
-            f"api {api_base}  commands /help /status /connect /set-default /wipe /quit",
+            f"api {api_base}  commands /help /status /tools /cloud-tools /connect /wipe /quit",
             style="dim",
         )
     )
@@ -1848,18 +1867,6 @@ async def cli_input_loop(
                 f"startup_channels: {channel_summary(load_cli_config().get('startup_channels', []))}",
             ]
             await events.emit("Control status", "\n".join(part for part in details if part), "green")
-            continue
-
-        if ui is not None and prompt in {"/up", "/scroll up"}:
-            ui.scroll_output(-ui.output_page_size())
-            continue
-
-        if ui is not None and prompt in {"/down", "/scroll down"}:
-            ui.scroll_output(ui.output_page_size())
-            continue
-
-        if ui is not None and prompt in {"/bottom", "/newest"}:
-            ui.scroll_to_bottom()
             continue
 
         if command == "/connect":

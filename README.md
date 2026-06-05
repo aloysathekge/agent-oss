@@ -405,12 +405,24 @@ Instead of injecting all tool instructions into every prompt, the router sees a 
 
 Current included skills:
 
-- email
-- calendar
-- PDF generation
 - agent identity management
+- cloud app actions
 
 Tool execution uses a ReAct loop with a maximum of 5 iterations. If the loop reaches the limit, the model is forced to stop calling tools and produce a final text response.
+
+Cloud tools are the external-action layer for app and SaaS integrations such as GitHub, Gmail, Google Calendar, Slack, Notion, and Linear. Quarq keeps its own local identity tool native, while external app auth, tool search, and execution flow through the cloud-tool session.
+
+Users can inspect and expand the enabled cloud toolkit at runtime:
+
+```text
+/tools
+/which-tool check my unread emails
+/cloud-tools
+/add-tool gmail
+/remove-tool slack
+```
+
+Enabled cloud tools are stored in `local_memory/<AGENT_ID>/agent_tools.json`, with `.env` values used as startup defaults.
 
 ### Adding A New Tool
 
@@ -447,6 +459,8 @@ YOUR_TOOL_TOOLS = [your_first_tool, your_second_tool]
 ```
 
 That is it. `tools/__init__.py` automatically scans every subdirectory with a `skill.md`, imports the package, reads the frontmatter, and registers the exported `<FOLDER_NAME>_TOOLS` list. No central registry edit is required.
+
+For user-scoped dynamic tools, a skill package can also export `<FOLDER_NAME>_TOOLS_FACTORY(runtime_config)`. This is how the cloud-tools skill creates session tools for the active `user_id` without hard-coding every external app schema into the prompt.
 
 This gives Quarq a clean capability expansion path: add a folder, describe the skill, export the tools, restart the process, and the agent can route to the new capability.
 
@@ -643,6 +657,11 @@ python agent_cli.py
 
 The control console starts `main:app` for you, connects the CLI to the API job queue, and shows structured events as requests move through retrieval, tool routing, generation, tool use, and final response.
 
+The API worker keeps process-lifetime chat history per channel and passes the
+last four user/assistant pairs into each agent request. This preserves short
+references such as "done" after an auth link or "now check calendar" without
+stuffing the full conversation into every prompt.
+
 You can still run the raw terminal agent directly:
 
 ```bash
@@ -680,14 +699,16 @@ Console commands:
 ```text
 /help
 /status
+/tools
+/which-tool <task>
+/cloud-tools
+/add-tool <tool>
+/remove-tool <tool>
 /connect telegram
 set-default start-channel telegram
 set-default start-channel none
 /wipe
 /quit
-/up
-/down
-/bottom
 ```
 
 `/connect telegram` starts the Telegram connection pipeline only when you ask for it. `set-default start-channel telegram` stores a local startup preference in `local_memory/<AGENT_ID>/agent_cli.json`, so future CLI launches can connect that channel automatically. `set-default start-channel none` clears that preference.
@@ -766,6 +787,11 @@ Channel commands also work from Telegram:
 ```text
 /help
 /status
+/tools
+/which-tool <task>
+/cloud-tools
+/add-tool <tool>
+/remove-tool <tool>
 /wipe
 /quit
 ```
@@ -813,10 +839,14 @@ This is what lets the console show useful loader text such as memory retrieval, 
 | `AGENT_PERSONALITY` | no | Default tone/personality when no local identity config exists. |
 | `AGENT_USE_CASES` | no | Default use-case description. Accepts a JSON array or comma-separated string. |
 | `AGENT_CUSTOM_PROMPT` | no | Default custom behavior instructions when no local identity config exists. |
-| `QUARQ_AGENT_VERSION` | no | Display-only version label for the control console. Defaults to `v0.4.1`. |
+| `QUARQ_AGENT_VERSION` | no | Display-only version label for the control console. Defaults to `v0.4.4`. |
 | `QUARQ_MODEL_LABEL` | no | Display-only model label for the control console. Falls back to generation model labels. |
 | `QUARQ_REASONING_EFFORT` | no | Optional display suffix for the console model label. |
 | `AGENT_DEBUG` | no | Set to `true`/`1` to show verbose debug logs from `agent.py`; metrics still print without debug. |
+| `CLOUD_TOOLS_API_KEY` | cloud tools only | Required to use external app tools through the cloud-tool session. |
+| `CLOUD_TOOLKITS` | no | Comma-separated cloud-tool slugs. Defaults to `github,gmail,googlecalendar,slack,notion,linear`. |
+| `CLOUD_TOOLS_CONFIG_PATH` | no | Optional override for enabled cloud-tool config. Defaults to `local_memory/<AGENT_ID>/agent_tools.json`. |
+| `CLOUD_TOOLS_CACHE_DIR` | no | Writable cloud-tool SDK cache directory. Defaults to `local_memory/cloud_tools_cache`. |
 | `TELEGRAM_BOT_TOKEN` | Telegram only | Bot token from `@BotFather`. Required for `/connect telegram`. |
 | `TELEGRAM_ALLOWED_USERS` | Telegram recommended | Comma-separated numeric Telegram user IDs allowed to use the local agent. |
 | `TELEGRAM_WEBHOOK_SECRET` | Telegram recommended | Secret token sent to Telegram `setWebhook` and verified by `/api/telegram/webhook`. |
@@ -856,7 +886,7 @@ Quarq is built around a few hard rules:
 
 ## Status
 
-Quarq Agent v0.4.1 is an active OSS release candidate.
+Quarq Agent v0.4.4 is an active OSS release candidate.
 
 The current version is optimized for long-memory evaluation and single-user local memory. The next natural steps are:
 

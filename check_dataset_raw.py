@@ -2,7 +2,7 @@ import json
 import os
 
 DATASET_PATH = os.path.join("eval_datasets", "longmemeval_s_cleaned.json")
-TARGET_QUESTION_ID = "d851d5ba"
+TARGET_QUESTION_ID = "370a8ff4"
 OUTPUT_FILE = "debug_raw_data.txt"
 
 def check_raw_data():
@@ -22,16 +22,27 @@ def check_raw_data():
 
     
     keywords = [
-    "$2,000",
-    "$500",
-    "$250",
-    "$1,000",
-    "$5,000",
-    "animal shelter",
-    "American Cancer Society",
-    "Run for Hunger",
-    "children's hospital",
-    "music benefit concert",
+    "370a8ff4",
+    "How many weeks had passed since I recovered from the flu",
+    "10th jog outdoors",
+    "went on my 10th jog outdoors",
+    "back in shape after a harsh winter",
+    "recovered from the flu",
+    "recently recovered from the flu",
+    "recovering from the flu",
+    "easing back into jogging",
+    "two-week break",
+    "break from jogging",
+    "flu",
+    "jogging",
+    "outdoors",
+    "April 10, 2023",
+    "2023/04/10",
+    "January 19, 2023",
+    "2023/01/19",
+    "December 26, 2022",
+    "2022/12/26",
+    "15 weeks"
 ]
 
     match_count = 0

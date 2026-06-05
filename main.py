@@ -16,10 +16,13 @@ from typing import Optional
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from agent_connector import get_quarq_response
 from agent import wipe_all_memories_for_api
+from agent_tools_config import handle_tool_command, load_enabled_cloud_tools
+from tools.composio.client import clear_composio_session_cache
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,9 +50,10 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 TELEGRAM_TYPING_INTERVAL_SECONDS = 4
 EVENT_BUFFER_SIZE = 300
+CHAT_HISTORY_WINDOW_MESSAGES = 8
 
 
-app = FastAPI(title="Quarq Agent", version="0.4.1")
+app = FastAPI(title="Quarq Agent", version="0.4.4")
 EVENTS = deque(maxlen=EVENT_BUFFER_SIZE)
 EVENT_LOCK = asyncio.Lock()
 EVENT_SEQ = 0
@@ -58,6 +62,8 @@ JOB_DONE_EVENTS: dict[str, asyncio.Event] = {}
 JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 JOB_LOCK = asyncio.Lock()
 JOB_WORKER_TASK: asyncio.Task | None = None
+CHAT_HISTORIES: dict[str, list[BaseMessage]] = {}
+CHAT_HISTORY_LOCK = asyncio.Lock()
 
 
 class ChatRequest(BaseModel):
@@ -77,6 +83,11 @@ def help_text() -> str:
             "Available commands:",
             "/help - show commands",
             "/status - show agent/API status",
+            "/tools - list enabled native and cloud tools",
+            "/which-tool <task> - show which tool fits a task",
+            "/cloud-tools - list cloud tools available to enable",
+            "/add-tool <tool> - enable a cloud tool",
+            "/remove-tool <tool> - disable a cloud tool",
             "/wipe - clear local memories",
             "/quit - stop the local CLI only; remote channels cannot stop the process",
         ]
@@ -91,6 +102,8 @@ def status_payload() -> dict:
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
         "telegram_allowed_users_configured": TELEGRAM_ALLOWED_USERS is not None,
         "job_queue_size": JOB_QUEUE.qsize(),
+        "enabled_cloud_tools": load_enabled_cloud_tools(),
+        "chat_history_channels": list(CHAT_HISTORIES),
     }
 
 
@@ -115,7 +128,11 @@ async def handle_channel_command(prompt: str, channel_type: str) -> Optional[dic
     elif command in {"/quit", "/exit"}:
         response = "This command only works in the local CLI. Remote channels cannot stop the local process."
     else:
-        return None
+        response = handle_tool_command(prompt)
+        if response is None:
+            return None
+        if command in {"/add-tool", "/enable-tool", "/remove-tool", "/disable-tool"}:
+            clear_composio_session_cache()
 
     await record_event(
         "system",
@@ -185,6 +202,52 @@ def job_event_title(stage: str, data: Optional[dict] = None) -> str:
     return "Job status"
 
 
+def public_tool_name(tool_name: str | None) -> str | None:
+    if not tool_name:
+        return None
+    if str(tool_name).upper().startswith("COMPOSIO_"):
+        return "cloud tools"
+    if str(tool_name) == "configure_cloud_tools":
+        return "cloud tools"
+    return str(tool_name)
+
+
+def public_skill_names(skills: list | None) -> list:
+    public_names = []
+    for skill in skills or []:
+        if str(skill) == "composio":
+            public_names.append("cloud tools")
+        else:
+            public_names.append(skill)
+    return public_names
+
+
+def chat_history_key(channel_type: str) -> str:
+    return str(channel_type or "web").strip().lower() or "web"
+
+
+async def get_recent_chat_history(channel_type: str) -> list[BaseMessage]:
+    key = chat_history_key(channel_type)
+    async with CHAT_HISTORY_LOCK:
+        return list(CHAT_HISTORIES.get(key, [])[-CHAT_HISTORY_WINDOW_MESSAGES:])
+
+
+async def append_chat_history(
+    channel_type: str,
+    user_prompt: str,
+    agent_response: str,
+) -> None:
+    key = chat_history_key(channel_type)
+    async with CHAT_HISTORY_LOCK:
+        history = CHAT_HISTORIES.setdefault(key, [])
+        history.extend(
+            [
+                HumanMessage(content=user_prompt),
+                AIMessage(content=agent_response),
+            ]
+        )
+
+
 async def get_job_snapshot(job_id: str) -> dict:
     async with JOB_LOCK:
         job = JOBS.get(job_id)
@@ -200,14 +263,26 @@ async def update_job_progress(
     data: Optional[dict] = None,
 ) -> None:
     data = data or {}
+    raw_tool_name = data.get("tool_name")
+    display_tool_name = public_tool_name(raw_tool_name)
     title = job_event_title(stage, data)
     event_key = (
         stage,
         message,
-        data.get("tool_name"),
+        raw_tool_name,
         data.get("tool_status"),
         tuple(data.get("skills") or []),
     )
+    display_message = (
+        message.replace(str(raw_tool_name), display_tool_name or str(raw_tool_name))
+        if raw_tool_name and display_tool_name
+        else message
+    )
+    event_data = {**data}
+    if raw_tool_name:
+        event_data["tool_name"] = display_tool_name
+    if data.get("skills"):
+        event_data["skills"] = public_skill_names(data.get("skills"))
 
     should_record = True
     async with JOB_LOCK:
@@ -220,8 +295,8 @@ async def update_job_progress(
 
         job["status"] = "running"
         job["stage"] = stage
-        job["message"] = message
-        job["tool_name"] = data.get("tool_name")
+        job["message"] = display_message
+        job["tool_name"] = display_tool_name
         job["updated_at"] = now_iso()
         job["last_event_key"] = event_key
 
@@ -229,8 +304,8 @@ async def update_job_progress(
         await record_event(
             "job",
             title,
-            message,
-            {"job_id": job_id, "stage": stage, **data},
+            display_message,
+            {"job_id": job_id, "stage": stage, **event_data},
         )
 
 
@@ -362,15 +437,17 @@ async def run_chat_job(job_id: str) -> None:
 
     try:
         await update_job_progress(job_id, "retrieval", "Searching memory.")
+        chat_history = await get_recent_chat_history(req.channel_type)
         response, metrics, contexts = await get_quarq_response(
             user_prompt=req.prompt,
             user_id=AGENT_USER_ID,
             channel_type=req.channel_type,
-            chat_history=[],
+            chat_history=chat_history,
             skip_learning=req.skip_learning,
             current_date=req.current_date,
             status_callback=status_callback,
         )
+        await append_chat_history(req.channel_type, req.prompt, response)
         elapsed = time.perf_counter() - started
         result = {"response": response, "metrics": metrics, "contexts": contexts}
         await complete_job(job_id, result)

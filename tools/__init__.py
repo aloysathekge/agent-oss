@@ -7,6 +7,8 @@ A skill is any folder that contains:
   - `skill.md` with YAML frontmatter: `name`, `description`, optional `triggers`
   - a Python package (`__init__.py`) exposing `<NAME>_TOOLS` — a list of
     LangChain `@tool` callables.
+  - optionally `<NAME>_TOOLS_FACTORY` — a callable that receives runtime config
+    and returns per-request LangChain tools.
 
 Add a new skill = drop in a new folder. No edits here needed.
 """
@@ -52,12 +54,14 @@ def discover_skills() -> dict:
         module = importlib.import_module(f"tools.{entry.name}")
         tools_attr = f"{entry.name.upper()}_TOOLS"
         tools_list = getattr(module, tools_attr, [])
+        tools_factory = getattr(module, f"{entry.name.upper()}_TOOLS_FACTORY", None)
 
         skills[meta["name"]] = {
             "description": meta.get("description", ""),
             "triggers": meta.get("triggers", ""),
             "skill_md_path": str(skill_file),
             "tools": tools_list,
+            "tools_factory": tools_factory,
         }
 
     return skills

@@ -1,4 +1,4 @@
-# Quarq Agent v0.4.4
+# Quarq Agent v0.4.0
 
 import os
 import json
@@ -7,7 +7,7 @@ import re
 import numpy as np
 import faiss
 from datetime import datetime
-from typing import Any, TypedDict, Sequence
+from typing import TypedDict, Sequence
 from dotenv import load_dotenv
 import shutil
 import time
@@ -1764,37 +1764,6 @@ def debug_memory_block(label: str, value: str) -> None:
     debug_print(clean_value if clean_value else "None")
 
 
-def public_tool_display_name(name: str | None) -> str:
-    text = str(name or "")
-    if text == "composio" or text.upper().startswith("COMPOSIO_"):
-        return "cloud tools"
-    if text == "configure_cloud_tools":
-        return "cloud tools"
-    return text
-
-
-def public_skill_display_names(names: list[str]) -> list[str]:
-    return [public_tool_display_name(name) for name in names]
-
-
-async def report_job_status(
-    state: dict,
-    stage: str,
-    message: str = "",
-    data: dict | None = None,
-) -> None:
-    callback = state.get("job_status_callback")
-    if not callback:
-        return
-
-    try:
-        result = callback(stage, message, data or {})
-        if asyncio.iscoroutine(result):
-            await result
-    except Exception as exc:
-        debug_print(f"[Warning] Failed to update job status: {exc}")
-
-
 # ==========================================
 # 4. GRAPH STATE
 # ==========================================
@@ -1813,7 +1782,6 @@ class AgentState(TypedDict):
     channel_type: str  # NEW: e.g., 'telegram', 'whatsapp', 'terminal'
     metrics: dict
     current_date: str  # 🛠️ ADDED: To explicitly pass the benchmark date
-    job_status_callback: Any
 
 
 # ==========================================
@@ -1821,7 +1789,6 @@ class AgentState(TypedDict):
 # ==========================================
 async def retrieve_memories_node(state: AgentState):
     start_time = time.time()  # START TIMER
-    await report_job_status(state, "retrieval", "Building memory queries.")
 
     # 🛠️ BENCHMARK SYNC: If this is a final benchmark question, wait for all background memories to save FIRST!
     global PENDING_LEARNING_TASKS
@@ -2062,13 +2029,6 @@ async def retrieve_memories_node(state: AgentState):
 
     current_top_k = 20 if search_mode == "deep" else 10
 
-    await report_job_status(
-        state,
-        "retrieval",
-        f"Searching memory in {search_mode.upper()} mode.",
-        {"search_mode": search_mode, "threshold": current_threshold},
-    )
-
     debug_print(f"HYDE Mode: [{search_mode.upper()}] (Threshold: {current_threshold})")
     debug_print("HYDE Vector Queries:", search_queries)
     if keywords:
@@ -2212,16 +2172,6 @@ async def retrieve_memories_node(state: AgentState):
         f"⏱️ [Metrics] Time: {end_time - start_time:.2f}s | Tokens: In({in_tokens}) Out({out_tokens})"
     )
     debug_print("---------------------------------\n")
-    await report_job_status(
-        state,
-        "retrieval",
-        "Memory retrieval complete.",
-        {
-            "semantic_lines": len(str(semantic_result or "").splitlines()),
-            "episodic_lines": len(str(episodic_result or "").splitlines()),
-            "procedural_lines": len(str(procedural_result or "").splitlines()),
-        },
-    )
 
     return {
         "semantic_context": semantic_result,
@@ -2238,7 +2188,6 @@ async def retrieve_memories_node(state: AgentState):
 async def route_tools_node(state: AgentState):
     """Pick skills for this turn using the tool_manager."""
     start_time = time.time()
-    await report_job_status(state, "tool_routing", "Checking whether a tool is needed.")
 
     def print_tool_metrics() -> None:
         end_time = time.time()
@@ -2252,23 +2201,11 @@ async def route_tools_node(state: AgentState):
     if state.get("channel_type") == "benchmark":
         debug_print("--- Tool Routing: Skipped (Benchmark Mode) ---")
         print_tool_metrics()
-        await report_job_status(
-            state,
-            "tool_routing",
-            "Tool routing skipped for benchmark mode.",
-            {"skills": []},
-        )
         return {"selected_skills": [], "skill_markdown": ""}
 
     if is_memory_ingestion_prompt(state["user_prompt"]):
         debug_print("--- Tool Routing: Skipped (Memory Ingestion Mode) ---")
         print_tool_metrics()
-        await report_job_status(
-            state,
-            "tool_routing",
-            "Tool routing skipped for memory ingestion.",
-            {"skills": []},
-        )
         return {"selected_skills": [], "skill_markdown": ""}
 
     # We pass the history to the tool router for better intent detection
@@ -2292,23 +2229,9 @@ async def route_tools_node(state: AgentState):
     if not chosen_skills:
         debug_print("--- Tool Routing: No skill selected ---")
         print_tool_metrics()
-        await report_job_status(
-            state,
-            "tool_routing",
-            "No tool needed for this request.",
-            {"skills": []},
-        )
         return {"selected_skills": [], "skill_markdown": ""}
 
-    debug_print(
-        f"--- Tool Routing: Skills Selected -> '{public_skill_display_names(chosen_skills)}' ---"
-    )
-    await report_job_status(
-        state,
-        "tool_routing",
-        "Tool skill selected.",
-        {"skills": chosen_skills},
-    )
+    debug_print(f"--- Tool Routing: Skills Selected -> '{chosen_skills}' ---")
 
     combined_markdown = ""
     for skill in chosen_skills:
@@ -2324,7 +2247,6 @@ async def route_tools_node(state: AgentState):
 # ==========================================
 async def generate_response_node(state: AgentState):
     start_time = time.time()
-    await report_job_status(state, "generation", "Generating response.")
 
     # 1. INITIALIZE variables at the top of the function scope
     in_tokens = 0
@@ -2684,17 +2606,10 @@ async def generate_response_node(state: AgentState):
     debug_print(f"""User question at this time ({question_time_str}):
     {state["user_prompt"]} """)
 
-    selected_skills = state.get("selected_skills", [])
-
     if state.get("skill_markdown"):
         system_instruction += (
             f"\n\n[ACTIVE SKILL INSTRUCTIONS]:\n{state['skill_markdown']}"
         )
-        system_instruction += """
-
-    [ACTIVE TOOL USE REQUIREMENT]
-    The current request has already been routed to one or more active skills. You must call the relevant bound tool before giving the final answer. Do not answer from memory, assumptions, or an apology about missing access until the tool result confirms what happened. If the tool returns an auth or connect link, give that link to the user as the next step.
-        """.rstrip()
 
     messages = (
         [SystemMessage(content=system_instruction)]
@@ -2702,6 +2617,7 @@ async def generate_response_node(state: AgentState):
         + [HumanMessage(content=final_user_prompt)]
     )
 
+    selected_skills = state.get("selected_skills", [])
     last_response = None
     is_memory_ingestion = is_memory_ingestion_prompt(state["user_prompt"])
 
@@ -2720,15 +2636,10 @@ async def generate_response_node(state: AgentState):
     elif selected_skills:
 
         tools_list = []
-        runtime_config = {
-            "user_id": state.get("user_id"),
-            "channel_type": state.get("channel_type"),
-        }
         for skill in selected_skills:
-            skill_data = tool_manager.load_skill(skill, runtime_config=runtime_config)
+            skill_data = tool_manager.load_skill(skill)
             tools_list.extend(skill_data["tools"])
 
-        forced_tool_llm = gen_llm.bind_tools(tools_list, tool_choice="any")
         llm_with_tools = gen_llm.bind_tools(tools_list)
 
         # --- NEW: ReAct Loop ---
@@ -2738,8 +2649,7 @@ async def generate_response_node(state: AgentState):
         while iteration < MAX_ITERATIONS:
 
             # --- Pass 1: Intent & Initial Tool Call ---
-            active_llm = forced_tool_llm if iteration == 0 else llm_with_tools
-            response = await active_llm.ainvoke(messages)
+            response = await llm_with_tools.ainvoke(messages)
 
             # Track Tokens
             m = get_token_metrics(response)
@@ -2759,21 +2669,10 @@ async def generate_response_node(state: AgentState):
             tool_msgs = []
             for call in tool_calls:
                 fn = next((t for t in tools_list if t.name == call["name"]), None)
-                display_tool_name = public_tool_display_name(call["name"])
                 if fn:
                     try:
-                        await report_job_status(
-                            state,
-                            "tool",
-                            f"Using tool: {display_tool_name}",
-                            {
-                                "tool_name": call["name"],
-                                "tool_status": "running",
-                                "loop": iteration + 1,
-                            },
-                        )
                         debug_print(
-                            f"🔧 [Loop {iteration+1}] Executing Tool: {display_tool_name}..."
+                            f"🔧 [Loop {iteration+1}] Executing Tool: {call['name']}..."
                         )
 
                         # 🚀 NEW: CACHE INVALIDATION INTERCEPTOR
@@ -2794,40 +2693,10 @@ async def generate_response_node(state: AgentState):
                         }
 
                         result = fn.invoke(call["args"], config=run_config)
-                        await report_job_status(
-                            state,
-                            "tool",
-                            f"Tool completed: {display_tool_name}",
-                            {
-                                "tool_name": call["name"],
-                                "tool_status": "completed",
-                                "loop": iteration + 1,
-                            },
-                        )
                     except Exception as e:
                         result = f"Error: {e}"
-                        await report_job_status(
-                            state,
-                            "tool",
-                            f"Tool failed: {display_tool_name}",
-                            {
-                                "tool_name": call["name"],
-                                "tool_status": "failed",
-                                "loop": iteration + 1,
-                            },
-                        )
                 else:
                     result = "Tool not found."
-                    await report_job_status(
-                        state,
-                        "tool",
-                        f"Tool not found: {display_tool_name}",
-                        {
-                            "tool_name": call["name"],
-                            "tool_status": "failed",
-                            "loop": iteration + 1,
-                        },
-                    )
 
                 tool_msgs.append(
                     ToolMessage(content=str(result), tool_call_id=call["id"])
@@ -3120,8 +2989,6 @@ User question at this time ({question_time_str}):
 
     if not final_output:
         final_output = "I have processed that request using my tools, but I don't have a specific summary to display. Please let me know if you need anything else."
-
-    await report_job_status(state, "finalizing", "Finalizing response.")
 
     if state["channel_type"] != "terminal":
         print(f"Agent Response :{final_output}")

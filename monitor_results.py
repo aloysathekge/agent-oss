@@ -6,7 +6,10 @@ import subprocess
 from pathlib import Path
 
 REPORTS_DIR = Path("reports")
-RESULTS_PATTERN = "longmemeval_results*.json"
+RESULTS_PATTERNS = (
+    "longmemeval_results*.json",
+    "longmemeval_result*.json",
+)
 CHECK_INTERVAL = 2  # seconds
 
 
@@ -46,7 +49,10 @@ def load_json(path: Path):
 
 
 def get_result_files():
-    return sorted(REPORTS_DIR.glob(RESULTS_PATTERN))
+    files = set()
+    for pattern in RESULTS_PATTERNS:
+        files.update(REPORTS_DIR.glob(pattern))
+    return sorted(files)
 
 
 def get_files_hashes():
@@ -160,7 +166,8 @@ def announce_result(item, data):
 
 
 def main():
-    print(f"Watching files: {REPORTS_DIR / RESULTS_PATTERN}")
+    watched_patterns = ", ".join(str(REPORTS_DIR / pattern) for pattern in RESULTS_PATTERNS)
+    print(f"Watching files: {watched_patterns}")
 
     last_hashes = get_files_hashes()
     announced_ids = {

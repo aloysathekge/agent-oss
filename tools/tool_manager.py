@@ -138,8 +138,8 @@ async def select_skills(user_prompt: str, recent_history: str = "", memory_conte
     {user_prompt}
 
     INSTRUCTIONS:
-    1. Use the Recent conversation and Retrieved Memory to understand the implicit context of the user's message (e.g., if they say "send it", memory might reveal they mean an email).
-    2. If the user's request requires actions from MULTIPLE skills (e.g., searching an email and then creating a calendar event), return a comma-separated list of those skill names (e.g., "email, calendar").
+    1. Use the Recent conversation and Retrieved Memory to understand the implicit context of the user's message (e.g., if they say "send it", memory might reveal they mean a message or external app action).
+    2. If the user's request requires actions from MULTIPLE skills (e.g., updating the agent identity and then using an external app), return a comma-separated list of those skill names (e.g., "agent_identity_manager, composio").
     3. If it only requires one skill, return just that skill name.
     4. Return "none" if no skill applies — conceptual questions, chit-chat, discussing a topic without asking for an action, or anything ambiguous. When in doubt, return "none".
     5. Return ONLY the list of skill names. No punctuation other than commas. No explanation."""
@@ -161,7 +161,7 @@ async def select_skills(user_prompt: str, recent_history: str = "", memory_conte
     return valid_choices
 
 
-def load_skill(name: str) -> dict:
+def load_skill(name: str, runtime_config: dict | None = None) -> dict:
     """Return the full skill payload for the main graph to use.
 
     Returns {'markdown': <full skill.md text>, 'tools': [<tool_fn>, ...]}.
@@ -171,7 +171,15 @@ def load_skill(name: str) -> dict:
     skill = _SKILLS[name]
     with open(skill["skill_md_path"]) as f:
         markdown = f.read()
-    return {"markdown": markdown, "tools": skill["tools"]}
+
+    tools_list = list(skill["tools"])
+    tools_factory = skill.get("tools_factory")
+    if runtime_config is not None and callable(tools_factory):
+        factory_tools = tools_factory(runtime_config)
+        if factory_tools:
+            tools_list.extend(factory_tools)
+
+    return {"markdown": markdown, "tools": tools_list}
 
 
 def list_skills() -> dict:

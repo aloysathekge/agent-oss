@@ -23,19 +23,19 @@ class TestFrontmatterParsing:
         from tools import _parse_frontmatter
 
         text = """---
-name: email
-description: Send and receive emails.
-triggers: send email, inbox, draft
+name: composio
+description: Use external apps through cloud tools.
+triggers: github, gmail, calendar, slack
 ---
 
-# Email Skill
+# Cloud Tools Skill
 
 Instructions here.
 """
         meta = _parse_frontmatter(text)
-        assert meta["name"] == "email"
-        assert meta["description"] == "Send and receive emails."
-        assert "send email" in meta["triggers"]
+        assert meta["name"] == "composio"
+        assert meta["description"] == "Use external apps through cloud tools."
+        assert "github" in meta["triggers"]
 
     def test_no_frontmatter_returns_empty(self):
         from tools import _parse_frontmatter
@@ -69,14 +69,17 @@ class TestSkillDiscovery:
 
         skills = discover_skills()
 
-        # The repo ships with at least email, calendar, pdf_generator, agent_identity_manager
-        assert len(skills) >= 1  # At minimum one skill should exist
+        assert {"agent_identity_manager", "composio"}.issubset(skills)
+        assert "email" not in skills
+        assert "calendar" not in skills
+        assert "pdf_generator" not in skills
 
         # Check structure of any discovered skill
         for name, info in skills.items():
             assert "description" in info
             assert "skill_md_path" in info
             assert "tools" in info
+            assert "tools_factory" in info
             assert isinstance(info["tools"], list)
             assert os.path.isfile(info["skill_md_path"])
 
