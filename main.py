@@ -59,7 +59,8 @@ TELEGRAM_MESSAGE_LIMIT = 3900
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 TELEGRAM_TYPING_INTERVAL_SECONDS = 4
-CHANNEL_FILE_MAX_BYTES = int(os.getenv("CHANNEL_FILE_MAX_BYTES", "25000000"))
+DEFAULT_CHANNEL_FILE_MAX_BYTES = 20_000_000
+CHANNEL_FILE_MAX_BYTES = int(os.getenv("CHANNEL_FILE_MAX_BYTES", str(DEFAULT_CHANNEL_FILE_MAX_BYTES)))
 EVENT_BUFFER_SIZE = 300
 CHAT_HISTORY_WINDOW_MESSAGES = 8
 
@@ -641,6 +642,66 @@ async def keep_telegram_typing(chat_id: int):
         await asyncio.sleep(TELEGRAM_TYPING_INTERVAL_SECONDS)
 
 
+def format_file_size(size_bytes: int | None) -> str:
+    if not size_bytes:
+        return "unknown size"
+    if size_bytes >= 1_000_000:
+        return f"{size_bytes / 1_000_000:.1f} MB"
+    if size_bytes >= 1_000:
+        return f"{size_bytes / 1_000:.1f} KB"
+    return f"{size_bytes} bytes"
+
+
+def telegram_download_limit_message(size_bytes: int | None = None) -> str:
+    limit = format_file_size(CHANNEL_FILE_MAX_BYTES)
+    if size_bytes:
+        return (
+            f"That file is {format_file_size(size_bytes)}, which is above this agent's "
+            f"Telegram download limit of {limit}. Please send a smaller file or share "
+            "the important text directly."
+        )
+    return (
+        f"That file is above this agent's Telegram download limit of {limit}. "
+        "Please send a smaller file or share the important text directly."
+    )
+
+
+def is_telegram_size_limit_error(error: Exception) -> bool:
+    text = str(error).lower()
+    return any(
+        marker in text
+        for marker in (
+            "file is too big",
+            "file is too large",
+            "request entity too large",
+            "above channel_file_max_bytes",
+            "telegram download limit",
+        )
+    )
+
+
+def public_attachment_error(error: Exception | str) -> str:
+    text = str(error)
+    if "telegram download limit" in text.lower():
+        return text
+    if isinstance(error, Exception) and is_telegram_size_limit_error(error):
+        return telegram_download_limit_message()
+    return "I could not download or read it locally. Please try again with a smaller/common file."
+
+
+def format_attachment_failure_message(failures: list[dict]) -> str:
+    if not failures:
+        return ""
+
+    lines = ["I could not process these attachment(s):"]
+    for failure in failures[:5]:
+        label = failure.get("filename") or failure.get("kind") or "attachment"
+        lines.append(f"- {label}: {failure.get('message')}")
+    if len(failures) > 5:
+        lines.append(f"- {len(failures) - 5} more attachment(s) also failed.")
+    return "\n".join(lines)
+
+
 def telegram_file_references(message: dict) -> list[dict]:
     refs = []
 
@@ -702,13 +763,17 @@ def telegram_file_references(message: dict) -> list[dict]:
 
 
 async def download_telegram_file(file_id: str) -> tuple[bytes, dict]:
-    file_info = await telegram_api_call("getFile", {"file_id": file_id})
+    try:
+        file_info = await telegram_api_call("getFile", {"file_id": file_id})
+    except Exception as exc:
+        if is_telegram_size_limit_error(exc):
+            raise RuntimeError(telegram_download_limit_message()) from exc
+        raise
+
     result = file_info.get("result") or {}
     file_size = int(result.get("file_size") or 0)
     if file_size and file_size > CHANNEL_FILE_MAX_BYTES:
-        raise RuntimeError(
-            f"Telegram file is {file_size} bytes, above CHANNEL_FILE_MAX_BYTES={CHANNEL_FILE_MAX_BYTES}."
-        )
+        raise RuntimeError(telegram_download_limit_message(file_size))
 
     file_path = result.get("file_path")
     if not file_path:
@@ -721,9 +786,7 @@ async def download_telegram_file(file_id: str) -> tuple[bytes, dict]:
         content = response.content
 
     if len(content) > CHANNEL_FILE_MAX_BYTES:
-        raise RuntimeError(
-            f"Telegram file is {len(content)} bytes, above CHANNEL_FILE_MAX_BYTES={CHANNEL_FILE_MAX_BYTES}."
-        )
+        raise RuntimeError(telegram_download_limit_message(len(content)))
     return content, result
 
 
@@ -733,8 +796,9 @@ async def store_telegram_attachments(
     telegram_user_id: int | None,
     username: str,
     update_id: int | None,
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     records = []
+    failures = []
     for ref in refs:
         try:
             content, file_info = await download_telegram_file(ref["file_id"])
@@ -775,7 +839,14 @@ async def store_telegram_attachments(
                 str(exc),
                 {"channel": "telegram", "file_id": ref.get("file_id"), "kind": ref.get("kind")},
             )
-    return records
+            failures.append(
+                {
+                    "kind": ref.get("kind"),
+                    "filename": ref.get("filename"),
+                    "message": public_attachment_error(exc),
+                }
+            )
+    return records, failures
 
 
 def prompt_for_telegram_message(text: str, attachment_records: list[dict]) -> str:
@@ -841,19 +912,28 @@ async def process_telegram_update(update: dict):
         return
 
     try:
-        attachment_records = await store_telegram_attachments(
+        attachment_records, attachment_failures = await store_telegram_attachments(
             file_refs,
             chat_id=chat_id,
             telegram_user_id=telegram_user_id,
             username=username,
             update_id=update.get("update_id"),
         )
-        if file_refs and not attachment_records and not text:
+        if attachment_failures and not attachment_records:
+            failure_message = format_attachment_failure_message(attachment_failures)
             await send_telegram_message(
                 chat_id,
-                "I received the file, but could not store or read it locally. Please try again with a smaller file.",
+                failure_message,
+            )
+            await append_chat_history(
+                "telegram",
+                text or "I sent attachment(s), but they could not be processed.",
+                failure_message,
+                conversation_id=str(chat_id),
             )
             return
+        if attachment_failures:
+            await send_telegram_message(chat_id, format_attachment_failure_message(attachment_failures))
 
         command_result = None
         if text and not attachment_records:
@@ -946,7 +1026,10 @@ async def ingest_file(req: FileIngestRequest):
     if len(content) > CHANNEL_FILE_MAX_BYTES:
         raise HTTPException(
             status_code=413,
-            detail=f"file is above CHANNEL_FILE_MAX_BYTES={CHANNEL_FILE_MAX_BYTES}",
+            detail=(
+                f"file is {format_file_size(len(content))}, above the configured "
+                f"channel limit of {format_file_size(CHANNEL_FILE_MAX_BYTES)}"
+            ),
         )
 
     try:

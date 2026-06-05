@@ -781,6 +781,12 @@ passed to the current agent job as attachment context. Future channel adapters
 can use the same generic `POST /api/files` endpoint, then include the returned
 attachment IDs in `/api/jobs` or `/api/chat`.
 
+Telegram may allow a user to send a larger file into the chat, but the official
+bot download path is limited. Quarq defaults `CHANNEL_FILE_MAX_BYTES` to
+`20000000` bytes (about 20 MB) for channel attachments. If a file is too large
+or cannot be downloaded/read, the Telegram bot replies with a clear attachment
+failure message instead of silently answering from the caption alone.
+
 ### Telegram
 
 1. Create a Telegram bot with `@BotFather`.
@@ -861,7 +867,7 @@ This is what lets the console show useful loader text such as memory retrieval, 
 | `USER_ID` | API only | Required by `main.py` for the FastAPI worker. |
 | `LOCAL_MEMORY_ROOT` | no | Root folder for local memory. Defaults to `local_memory`. |
 | `LOCAL_CHANNEL_STORAGE_ROOT` | no | Optional override for durable channel chat history and attachment storage. Defaults to `local_memory/<AGENT_ID>/channel_state`. |
-| `CHANNEL_FILE_MAX_BYTES` | no | Max accepted channel attachment size in bytes. Defaults to `25000000`. |
+| `CHANNEL_FILE_MAX_BYTES` | no | Max accepted channel attachment size in bytes. Defaults to `20000000` (about 20 MB, matching the practical Telegram bot download ceiling). |
 | `ATTACHMENT_EXTRACT_MAX_CHARS` | no | Max extracted text saved from an attachment. Defaults to `24000`. |
 | `MULTIMODAL_IMAGE_MODEL` | no | Optional OpenAI model for image descriptions. Defaults to `gpt-4o-mini`. |
 | `MULTIMODAL_AUDIO_MODEL` | no | Optional OpenAI model for audio transcription. Defaults to `gpt-4o-mini-transcribe`. |
